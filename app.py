@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
-from langchain_agent import DEFAULT_PROVIDER, PROVIDERS, DataAgent
+from langchain_agent import AUTO_REPORT_LABEL, AUTO_REPORT_PROMPT, DEFAULT_PROVIDER, PROVIDERS, DataAgent
 
 st.set_page_config(page_title="AI Data Analysis Agent", layout="wide", page_icon="📊")
 
@@ -189,6 +189,11 @@ if df is None:
 
 st.dataframe(df.head(), width="stretch")
 st.markdown("### 💬 Ask a question")
+if st.button(AUTO_REPORT_LABEL, type="primary",
+             help="The agent explores the data on its own: key facts, 3 charts, "
+                  "what drives the main change, and a short report."):
+    st.session_state.pending_prompt = AUTO_REPORT_LABEL
+    st.rerun()
 
 for i, msg in enumerate(st.session_state.chat_messages):
     with st.chat_message(msg["role"]):
@@ -236,7 +241,8 @@ if prompt:
                 show_step(len(live_steps), step)
 
         try:
-            reply = agent.ask(prompt, {"data": df}, on_step=on_step, critic=use_critic)
+            question = AUTO_REPORT_PROMPT if prompt == AUTO_REPORT_LABEL else prompt
+            reply = agent.ask(question, {"data": df}, on_step=on_step, critic=use_critic)
             status.update(label=steps_label(reply.steps) if reply.steps else "✅ Done",
                           state="complete", expanded=False)
             msg = {"role": "assistant", "content": reply.answer,

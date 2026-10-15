@@ -28,6 +28,8 @@ import pandas as pd  # noqa: E402
 import plotly.express as px  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 
+from rootcause import root_cause  # noqa: E402
+
 MAX_OUTPUT_CHARS = 4000
 
 
@@ -199,6 +201,7 @@ def run_code(code: str, datasets: Dict[str, Any]) -> RunOutcome:
         "ChartResult": ChartResult,
         "as_plotly": as_plotly, "as_matplotlib": as_matplotlib,
         "as_altair": as_altair, "as_data_prep": as_data_prep,
+        "root_cause": root_cause,
     }
     # Datasets are also available directly by name, as copies so failed code
     # can't half-modify the real data.

@@ -6,6 +6,7 @@ The LLM works in a loop with four tools:
   run_analysis    run pandas / SQL code and read the printed result
   make_chart      build a chart (checked to make sure it actually has data)
   update_dataset  clean or transform the data (later steps see the new data)
+  explain_change  root-cause finder: which segments drove a change between two groups
 
 Every tool returns plain text. When code fails, the error goes back to the
 LLM so it can fix the code and try again, up to MAX_FAILED_RUNS times.
@@ -26,6 +27,7 @@ from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 
 from AgentClass import ChartResult, describe_datasets, run_code
+from rootcause import format_root_cause, root_cause
 
 # LLM providers (all OpenAI-compatible). "key" is the secrets.toml entry holding the API key;
 # "models" are tool-calling models, the first one is the default.
@@ -54,8 +56,9 @@ PROVIDERS = {
 }
 DEFAULT_PROVIDER = "groq"
 MAX_FAILED_RUNS = 4      # code errors allowed per question before the agent must stop
-MAX_AGENT_STEPS = 30     # hard cap on loop length (LangGraph recursion limit)
+MAX_AGENT_STEPS = 40     # hard cap on loop length (LangGraph recursion limit); auto-reports need ~25
 MAX_HISTORY_MESSAGES = 10
+CRITIC_OUTPUT_BUDGET = 16000  # characters of tool output the critic sees in total
 
 SYSTEM_PROMPT = """You are a data analysis agent. The user has loaded tabular data and asks questions about it.
 
@@ -66,6 +69,10 @@ How to work:
 2. Use run_analysis to compute numbers and check them before you chart or answer. Print what you need to see.
 3. Use make_chart to draw a chart when it helps or when the user asks for one.
 4. Use update_dataset only when the user asks to clean, filter, rename or otherwise change the data.
+   Use explain_change when the user asks WHY a metric differs between two periods or groups
+   (e.g. "why did revenue drop in April?"). To chart its breakdown, in make_chart code use
+   table, summary = root_cause(data, metric, split_column, group_a, group_b, agg)
+   (table columns: column, segment, A, B, contribution, pct_of_change, expected, unexpected).
 5. If a tool returns an error, read it, fix the code and try again. Do not repeat the same code.
 6. Finish with a short answer in simple words: what you found and the key numbers. Don't paste code in the answer.
    Charts are shown to the user automatically; don't add image links or markdown images.
@@ -83,6 +90,29 @@ Code rules (all tools that take code):
     result = as_data_prep({"data": new_df}, "what changed")
 """
 
+
+AUTO_REPORT_LABEL = "📋 Analyze this dataset"
+AUTO_REPORT_PROMPT = """Analyze this dataset on your own and write a short report.
+Don't change the dataset (no update_dataset); only read it.
+
+1. Call inspect_data to understand the columns.
+2. Use run_analysis for the key facts: size, missing values, main numeric columns, top categories.
+3. Make 3 charts with make_chart (one chart per call) that show the most important patterns.
+4. Pick the most important numeric metric and a natural comparison: the last two months/periods if
+   there is a date column (split_column = the date column, groups = prefixes like '2024-11'),
+   otherwise the two main groups of a key category. Don't compare groups that are defined by the
+   metric itself (e.g. risk score by risk level). Call explain_change to find what drives the difference.
+   Report only what explain_change says (segment, contribution, unexpected); don't guess reasons.
+5. Finish with this markdown report. Use only numbers from the tool outputs:
+   ## Overview
+   2-3 sentences: what the data is, rows/columns, time range.
+   ## Key insights
+   3-5 bullets, each with a number.
+   ## What drives the change
+   What you compared, the total change, and the top 2-3 driver segments from explain_change.
+   ## Data quality
+   Missing values or other issues worth knowing.
+"""
 
 CRITIC_PROMPT = """You review a data analysis agent's work before the user sees it.
 You get the user's question, every tool step (code + output) and the agent's final answer.
@@ -289,9 +319,29 @@ class DataAgent:
         return self._log("update_dataset", code, True,
                          "Dataset updated. " + "; ".join(changes) + f"\nExplanation: {r.explanation}")
 
+    def explain_change(self, metric: str, split_column: str, group_a: str, group_b: str,
+                       agg: str = "sum", dataset: str = "data") -> str:
+        """Root-cause finder: why did a metric change between two groups or periods?
+        Compares agg ('sum', 'mean' or 'count') of `metric` for split_column == group_a vs group_b,
+        breaks the change down by every other column and ranks the segments that caused most of it.
+        For periods, pass the date column itself with prefixes: split_column='Date',
+        group_a='2024-03', group_b='2024-04' (no need to add a month column). For row counts use agg='count'."""
+        call = (f"explain_change(metric={metric!r}, split_column={split_column!r}, "
+                f"group_a={group_a!r}, group_b={group_b!r}, agg={agg!r})")
+        if (stop := self._out_of_attempts("explain_change", call)):
+            return stop
+        if dataset not in self.datasets:
+            return self._failed("explain_change", call, f"Unknown dataset '{dataset}'. Use one of: {list(self.datasets)}")
+        try:
+            table, summary = root_cause(self.datasets[dataset], metric, split_column, group_a, group_b, agg)
+        except ValueError as e:
+            return self._failed("explain_change", call, str(e))
+        return self._log("explain_change", call, True, format_root_cause(table, summary))
+
     def _make_tools(self):
         return [StructuredTool.from_function(func=f) for f in
-                (self.inspect_data, self.run_analysis, self.make_chart, self.update_dataset)]
+                (self.inspect_data, self.run_analysis, self.make_chart, self.update_dataset,
+                 self.explain_change)]
 
     # ------------------------------------------------------------ main entry
 
@@ -310,8 +360,17 @@ class DataAgent:
 
     def _critique(self, question: str, answer: str, steps: List[Step]) -> Dict[str, Any]:
         """Second LLM call that reviews the answer. Returns {"ok": bool, "problems": [str]}."""
-        work = "\n\n".join(f"[{i}] {s.tool} ({'ok' if s.ok else 'error'})\ncode:\n{s.code[:1500]}\n"
-                           f"output:\n{s.output[:1500]}" for i, s in enumerate(steps, 1)) or "(no tools used)"
+        # The critic must see the outputs the answer's numbers come from, so successful steps get
+        # most of the budget (~6k tokens in total, to stay under free-tier per-minute limits).
+        ok_steps = [s for s in steps if s.ok]
+        per_step = max(800, CRITIC_OUTPUT_BUDGET // max(len(ok_steps), 1))
+        parts = []
+        for i, s in enumerate(steps, 1):
+            if s.ok:
+                parts.append(f"[{i}] {s.tool} (ok)\ncode:\n{s.code[:1500]}\noutput:\n{s.output[:per_step]}")
+            else:
+                parts.append(f"[{i}] {s.tool} (failed, the agent retried): {' '.join(s.output.strip().splitlines()[1:2])[:200]}")
+        work = "\n\n".join(parts) or "(no tools used)"
         prompt = f"QUESTION:\n{question}\n\nTOOL STEPS:\n{work}\n\nFINAL ANSWER:\n{answer}"
         try:
             reply = _text(self.llm.invoke([SystemMessage(CRITIC_PROMPT), HumanMessage(prompt)]).content)
