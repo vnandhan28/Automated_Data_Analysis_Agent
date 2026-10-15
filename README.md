@@ -4,7 +4,7 @@ Ask questions about a CSV or Excel file in plain English. The agent looks at the
 
 ## How it works
 
-The LLM (Kimi-K2 via the Hugging Face router) runs in a loop with four tools:
+The LLM (Groq, Hugging Face router or Gemini — picked in the sidebar) runs in a loop with four tools:
 
 | Tool | What it does |
 |---|---|
@@ -25,9 +25,18 @@ If code fails, the error goes back to the agent so it can fix it and try again (
 
 ```bash
 pip install -r requirements.txt
-mkdir -p .streamlit
-echo 'HF_key = "hf_your_token_here"' > .streamlit/secrets.toml
 streamlit run app.py
+```
+
+Put your settings in `.streamlit/secrets.toml` (fill in at least one key):
+
+```toml
+PROVIDER = "groq"               # "groq", "hf" or "gemini"
+MODEL = "openai/gpt-oss-120b"   # default model for that provider
+
+GROQ_key = "gsk_..."
+HF_key = ""
+GEMINI_key = ""
 ```
 
 ## Safety

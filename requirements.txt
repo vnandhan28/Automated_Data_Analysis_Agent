@@ -9,3 +9,4 @@ openpyxl
 langchain>=1.0
 langchain-core
 langchain-openai
+langchain-google-genai

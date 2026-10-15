@@ -22,7 +22,32 @@ from langchain_openai import ChatOpenAI
 
 from AgentClass import ChartResult, describe_datasets, run_code
 
-DEFAULT_MODEL = "moonshotai/Kimi-K2-Instruct-0905"
+# LLM providers (all OpenAI-compatible). "key" is the secrets.toml entry holding the API key;
+# "models" are tool-calling models, the first one is the default.
+PROVIDERS = {
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "key": "GROQ_key",
+        "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
+    },
+    "hf": {
+        "base_url": "https://router.huggingface.co/v1",
+        "key": "HF_key",
+        "models": [
+            "meta-llama/Llama-3.3-70B-Instruct",
+            "meta-llama/Llama-3.3-70B-Instruct:together",  # ":provider" pins a provider
+            "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+            "moonshotai/Kimi-K2-Instruct-0905",
+        ],
+    },
+    # Gemini uses Google's own client: Gemini 3 tool calls need "thought signatures",
+    # which the OpenAI-compatible endpoint loses.
+    "gemini": {
+        "key": "GEMINI_key",
+        "models": ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-flash-latest", "gemini-3.1-pro-preview"],
+    },
+}
+DEFAULT_PROVIDER = "groq"
 MAX_FAILED_RUNS = 4      # code errors allowed per question before the agent must stop
 MAX_AGENT_STEPS = 30     # hard cap on loop length (LangGraph recursion limit)
 MAX_HISTORY_MESSAGES = 10
@@ -117,13 +142,21 @@ def _chart_summary(result: ChartResult) -> str:
 
 
 class DataAgent:
-    def __init__(self, api_key: str, model: str = DEFAULT_MODEL):
-        self.llm = ChatOpenAI(
-            base_url="https://router.huggingface.co/v1",
-            api_key=api_key,
-            model=model,
-            temperature=0.2,
-        )
+    def __init__(self, api_key: str, model: str = "", provider: str = DEFAULT_PROVIDER):
+        model = model or PROVIDERS[provider]["models"][0]
+        self.provider, self.model = provider, model
+        if provider == "gemini":
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            # Few retries + timeout so a busy model fails fast instead of hanging for minutes.
+            self.llm = ChatGoogleGenerativeAI(model=model, google_api_key=api_key, temperature=0.2,
+                                              max_retries=2, timeout=60)
+        else:
+            self.llm = ChatOpenAI(
+                base_url=PROVIDERS[provider]["base_url"],
+                api_key=api_key,
+                model=model,
+                temperature=0.2,
+            )
         self.history: List[Any] = []   # HumanMessage / AIMessage pairs
         self._agent = create_agent(model=self.llm, tools=self._make_tools(), system_prompt=SYSTEM_PROMPT)
         self._reset_turn({})

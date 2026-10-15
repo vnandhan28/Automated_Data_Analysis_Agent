@@ -3,7 +3,7 @@ import io
 import pandas as pd
 import streamlit as st
 
-from langchain_agent import DataAgent
+from langchain_agent import DEFAULT_PROVIDER, PROVIDERS, DataAgent
 
 st.set_page_config(page_title="AI Data Analysis Agent", layout="wide", page_icon="📊")
 
@@ -39,8 +39,32 @@ def set_data(df: pd.DataFrame, label: str):
 
 # ---------------------------------------------------------------- state
 
-if "agent" not in st.session_state:
-    st.session_state.agent = DataAgent(st.secrets["HF_key"])
+# Provider + model: PROVIDER / MODEL in secrets.toml set the defaults; the sidebar can change them.
+# Only providers whose API key is filled in are offered.
+providers = [p for p, cfg in PROVIDERS.items() if st.secrets.get(cfg["key"], "").strip()]
+if not providers:
+    st.error("No API key found. Add GROQ_key, HF_key or GEMINI_key to .streamlit/secrets.toml.")
+    st.stop()
+default_provider = st.secrets.get("PROVIDER", DEFAULT_PROVIDER)
+provider = st.sidebar.selectbox("🔌 Provider", providers,
+                                index=providers.index(default_provider) if default_provider in providers else 0)
+
+model_options = list(PROVIDERS[provider]["models"])
+secret_model = st.secrets.get("MODEL", "")
+if provider == default_provider and secret_model:
+    if secret_model not in model_options:
+        model_options.insert(0, secret_model)
+    model_index = model_options.index(secret_model)
+else:
+    model_index = 0
+model = st.sidebar.selectbox("🤖 Model", model_options, index=model_index)
+
+current = st.session_state.get("agent")
+if current is None or (current.provider, current.model) != (provider, model):
+    old = current
+    st.session_state.agent = DataAgent(st.secrets[PROVIDERS[provider]["key"]], model=model, provider=provider)
+    if old is not None:
+        st.session_state.agent.history = old.history  # keep chat memory when switching
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = []
 
