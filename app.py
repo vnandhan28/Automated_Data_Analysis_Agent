@@ -60,6 +60,9 @@ if provider == default_provider and secret_model:
 else:
     model_index = 0
 model = st.sidebar.selectbox("🤖 Model", model_options, index=model_index)
+use_critic = st.sidebar.toggle("🧐 Critic check", value=True,
+                               help="A second LLM call reviews each answer (code, numbers, claims) "
+                                    "and the agent fixes problems once. Slower, but more reliable.")
 
 current = st.session_state.get("agent")
 if current is None or (current.provider, current.model) != (provider, model):
@@ -157,6 +160,10 @@ def steps_label(steps) -> str:
 
 def show_step(i: int, s):
     icon = "✅" if s.ok else "⚠️"
+    if s.tool == "critic":
+        st.markdown(f"**{i}. 🧐 critic: {'approved' if s.ok else 'found problems'}**")
+        (st.success if s.ok else st.warning)(s.output)
+        return
     st.markdown(f"**{i}. {icon} {s.tool}**")
     if s.tool == "inspect_data":
         if s.code:
@@ -229,7 +236,7 @@ if prompt:
                 show_step(len(live_steps), step)
 
         try:
-            reply = agent.ask(prompt, {"data": df}, on_step=on_step)
+            reply = agent.ask(prompt, {"data": df}, on_step=on_step, critic=use_critic)
             status.update(label=steps_label(reply.steps) if reply.steps else "✅ Done",
                           state="complete", expanded=False)
             msg = {"role": "assistant", "content": reply.answer,

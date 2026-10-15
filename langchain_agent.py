@@ -9,14 +9,19 @@ The LLM works in a loop with four tools:
 
 Every tool returns plain text. When code fails, the error goes back to the
 LLM so it can fix the code and try again, up to MAX_FAILED_RUNS times.
+
+Optional critic: a second LLM call reviews the final answer against the tool
+outputs. If it finds problems, the agent gets one chance to fix them.
 """
 
+import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 
@@ -63,6 +68,7 @@ How to work:
 4. Use update_dataset only when the user asks to clean, filter, rename or otherwise change the data.
 5. If a tool returns an error, read it, fix the code and try again. Do not repeat the same code.
 6. Finish with a short answer in simple words: what you found and the key numbers. Don't paste code in the answer.
+   Charts are shown to the user automatically; don't add image links or markdown images.
 
 Code rules (all tools that take code):
 - Plain Python only. No imports: pd, np, px (plotly.express), go (plotly.graph_objects), plt, alt (altair) are ready.
@@ -76,6 +82,32 @@ Code rules (all tools that take code):
 - update_dataset code must end with:
     result = as_data_prep({"data": new_df}, "what changed")
 """
+
+
+CRITIC_PROMPT = """You review a data analysis agent's work before the user sees it.
+You get the user's question, every tool step (code + output) and the agent's final answer.
+
+Check only these things:
+1. The code answers the question that was asked (right columns, filters, grouping, aggregation).
+2. Every number in the final answer appears in, or follows directly from, the tool outputs. Rounding is fine.
+3. No overclaiming: no causes, trends or certainty that the outputs don't support.
+4. If a chart was asked for, a successful make_chart step exists.
+
+Charts from make_chart are shown to the user automatically next to the answer, so the answer
+text should NOT contain the chart itself. A short description of the chart is correct.
+Only report real problems that would make the answer wrong or misleading. Don't comment on style.
+Reply with JSON only, no other text:
+{"ok": true, "problems": []}
+or
+{"ok": false, "problems": ["short, specific description of each problem"]}
+"""
+
+
+def _text(content: Any) -> str:
+    """Message content as plain text (some models return a list of content blocks)."""
+    if isinstance(content, list):
+        return " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+    return content or ""
 
 
 @dataclass
@@ -156,6 +188,9 @@ class DataAgent:
                 api_key=api_key,
                 model=model,
                 temperature=0.2,
+                # Free tiers have tokens-per-minute limits; retries wait the time the API asks for.
+                max_retries=6,
+                timeout=60,
             )
         self.history: List[Any] = []   # HumanMessage / AIMessage pairs
         self._agent = create_agent(model=self.llm, tools=self._make_tools(), system_prompt=SYSTEM_PROMPT)
@@ -260,23 +295,62 @@ class DataAgent:
 
     # ------------------------------------------------------------ main entry
 
-    def ask(self, question: str, datasets: Dict[str, Any],
-            on_step: Optional[Callable[[Step], None]] = None) -> AgentReply:
-        """Answer one question. on_step(step) is called after every tool call."""
-        self._reset_turn(datasets, on_step)
-        messages = self.history[-MAX_HISTORY_MESSAGES:] + [HumanMessage(question)]
-
+    def _run(self, messages: List[Any]):
+        """One agent loop. Returns (answer, all messages), or (None, None) if the step limit was hit."""
         try:
             response = self._agent.invoke({"messages": messages},
                                           config={"recursion_limit": MAX_AGENT_STEPS})
-            answer = response["messages"][-1].content or ""
-            if isinstance(answer, list):  # some models return content blocks
-                answer = " ".join(b.get("text", "") for b in answer if isinstance(b, dict))
         except Exception as e:  # e.g. step limit reached or API error
             if type(e).__name__ == "GraphRecursionError":
-                answer = "I took too many steps on this one and stopped. Try asking a simpler or more specific question."
+                return None, None
+            raise
+        return _text(response["messages"][-1].content), response["messages"]
+
+    # ------------------------------------------------------------ critic
+
+    def _critique(self, question: str, answer: str, steps: List[Step]) -> Dict[str, Any]:
+        """Second LLM call that reviews the answer. Returns {"ok": bool, "problems": [str]}."""
+        work = "\n\n".join(f"[{i}] {s.tool} ({'ok' if s.ok else 'error'})\ncode:\n{s.code[:1500]}\n"
+                           f"output:\n{s.output[:1500]}" for i, s in enumerate(steps, 1)) or "(no tools used)"
+        prompt = f"QUESTION:\n{question}\n\nTOOL STEPS:\n{work}\n\nFINAL ANSWER:\n{answer}"
+        try:
+            reply = _text(self.llm.invoke([SystemMessage(CRITIC_PROMPT), HumanMessage(prompt)]).content)
+            verdict = json.loads(re.search(r"\{.*\}", reply, re.S).group(0))
+            problems = [str(p) for p in verdict.get("problems", []) if str(p).strip()]
+            return {"ok": bool(verdict.get("ok", not problems)) and not problems, "problems": problems}
+        except Exception as e:  # never block the answer on a broken review
+            return {"ok": True, "problems": [], "note": f"critic could not run: {str(e)[:150]}"}
+
+    # ------------------------------------------------------------ main entry
+
+    def ask(self, question: str, datasets: Dict[str, Any],
+            on_step: Optional[Callable[[Step], None]] = None, critic: bool = False) -> AgentReply:
+        """Answer one question. on_step(step) is called after every tool call.
+        With critic=True a second LLM call reviews the answer; if it finds problems
+        the agent gets one chance to fix them."""
+        self._reset_turn(datasets, on_step)
+        messages = self.history[-MAX_HISTORY_MESSAGES:] + [HumanMessage(question)]
+
+        answer, convo = self._run(messages)
+        if answer is not None and critic:
+            verdict = self._critique(question, answer, self.steps)
+            if verdict["ok"]:
+                self._log("critic", "", True, verdict.get("note", "Looks correct: the code matches the question "
+                                                                  "and the numbers match the tool outputs."))
             else:
-                raise
+                problems = "\n".join(f"- {p}" for p in verdict["problems"])
+                self._log("critic", "", False, f"Problems found, asking the agent to fix them:\n{problems}")
+                charts_before = len(self.charts)
+                fixed, _ = self._run(convo + [HumanMessage(
+                    f"A reviewer checked your answer and found these problems:\n{problems}\n\n"
+                    "Fix them. Use the tools again if you need to check something. "
+                    "Then give the corrected final answer to the original question.")])
+                if fixed is not None:
+                    answer = fixed
+                    if len(self.charts) > charts_before:  # new charts replace the first attempt's
+                        self.charts = self.charts[charts_before:]
+        if answer is None:
+            answer = "I took too many steps on this one and stopped. Try asking a simpler or more specific question."
 
         if not answer.strip():
             answer = "Done." if (self.charts or self.data_changed) else "I couldn't produce an answer."
