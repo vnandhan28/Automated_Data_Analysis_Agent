@@ -12,7 +12,7 @@ LLM so it can fix the code and try again, up to MAX_FAILED_RUNS times.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 from langchain.agents import create_agent
@@ -163,15 +163,19 @@ class DataAgent:
 
     # ------------------------------------------------------------ per-turn state
 
-    def _reset_turn(self, datasets: Dict[str, Any]):
+    def _reset_turn(self, datasets: Dict[str, Any], on_step: Optional[Callable[[Step], None]] = None):
         self.datasets: Dict[str, Any] = dict(datasets)
         self.charts: List[ChartResult] = []
         self.steps: List[Step] = []
         self.failed_runs = 0
         self.data_changed = False
+        self.on_step = on_step
 
     def _log(self, tool: str, code: str, ok: bool, output: str) -> str:
-        self.steps.append(Step(tool=tool, code=code, ok=ok, output=output))
+        step = Step(tool=tool, code=code, ok=ok, output=output)
+        self.steps.append(step)
+        if self.on_step:
+            self.on_step(step)  # e.g. the UI shows the step as it happens
         return output
 
     def _failed(self, tool: str, code: str, error: str) -> str:
@@ -256,8 +260,10 @@ class DataAgent:
 
     # ------------------------------------------------------------ main entry
 
-    def ask(self, question: str, datasets: Dict[str, Any]) -> AgentReply:
-        self._reset_turn(datasets)
+    def ask(self, question: str, datasets: Dict[str, Any],
+            on_step: Optional[Callable[[Step], None]] = None) -> AgentReply:
+        """Answer one question. on_step(step) is called after every tool call."""
+        self._reset_turn(datasets, on_step)
         messages = self.history[-MAX_HISTORY_MESSAGES:] + [HumanMessage(question)]
 
         try:

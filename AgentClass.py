@@ -89,7 +89,30 @@ BLOCKED_ATTRS = {
     "os", "sys", "subprocess", "system", "popen", "builtins", "importlib",
     "load", "loads", "fromfile", "tofile", "savefig", "save", "write_html",
     "connect", "execute", "eval", "format", "format_map", "lib",
+    "environ", "getenv", "secrets",  # API keys live in env vars / st.secrets
 }
+
+# Imports of libraries that are already loaded are removed instead of rejected,
+# so the model doesn't waste a retry on "import pandas as pd".
+PRELOADED_IMPORTS = {
+    ("pandas", "pd"), ("numpy", "np"), ("plotly.express", "px"),
+    ("plotly.graph_objects", "go"), ("matplotlib.pyplot", "plt"), ("altair", "alt"),
+}
+
+
+def strip_preloaded_imports(code: str) -> str:
+    """Drop top-level lines like `import pandas as pd`; leave everything else for check_code."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code  # check_code reports it
+    drop = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import) and all((a.name, a.asname) in PRELOADED_IMPORTS for a in node.names):
+            drop.update(range(node.lineno, node.end_lineno + 1))
+    if not drop:
+        return code
+    return "\n".join(line for i, line in enumerate(code.splitlines(), 1) if i not in drop)
 BLOCKED_ATTR_PREFIXES = ("read_", "write_", "to_csv", "to_excel", "to_parquet", "to_feather",
                          "to_hdf", "to_sql", "to_stata", "to_pickle", "to_clipboard")
 
@@ -162,7 +185,7 @@ def _short_error(exc: BaseException, code: str) -> str:
 
 def run_code(code: str, datasets: Dict[str, Any]) -> RunOutcome:
     """Run agent-written code. Never raises: errors come back in RunOutcome."""
-    code = strip_code_fences(code)
+    code = strip_preloaded_imports(strip_code_fences(code))
     try:
         check_code(code)
     except UnsafeCodeError as e:

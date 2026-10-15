@@ -1,7 +1,9 @@
 import io
+import threading
 
 import pandas as pd
 import streamlit as st
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from langchain_agent import DEFAULT_PROVIDER, PROVIDERS, DataAgent
 
@@ -148,21 +150,28 @@ def show_chart(chart, key: str):
         st.altair_chart(chart.obj, key=f"plot_{key}")
 
 
+def steps_label(steps) -> str:
+    failed = sum(1 for s in steps if not s.ok)
+    return f"🔧 Agent steps ({len(steps)}" + (f", {failed} fixed" if failed else "") + ")"
+
+
+def show_step(i: int, s):
+    icon = "✅" if s.ok else "⚠️"
+    st.markdown(f"**{i}. {icon} {s.tool}**")
+    if s.tool == "inspect_data":
+        if s.code:
+            st.caption(f"column: {s.code}")
+    else:
+        st.code(s.code, language="python")
+    st.text(s.output[:1500])
+
+
 def show_steps(steps):
     if not steps:
         return
-    failed = sum(1 for s in steps if not s.ok)
-    label = f"🔧 Agent steps ({len(steps)}" + (f", {failed} fixed" if failed else "") + ")"
-    with st.expander(label):
+    with st.expander(steps_label(steps)):
         for i, s in enumerate(steps, 1):
-            icon = "✅" if s.ok else "⚠️"
-            st.markdown(f"**{i}. {icon} {s.tool}**")
-            if s.tool == "inspect_data":
-                if s.code:
-                    st.caption(f"column: {s.code}")
-            else:
-                st.code(s.code, language="python")
-            st.text(s.output[:1500])
+            show_step(i, s)
 
 
 # ---------------------------------------------------------------- main chat
@@ -206,18 +215,34 @@ if prompt:
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("🧠 Working on it..."):
-            try:
-                reply = agent.ask(prompt, {"data": df})
-                msg = {"role": "assistant", "content": reply.answer,
-                       "charts": reply.charts, "steps": reply.steps}
-                if reply.data_changed:
-                    new_df = reply.datasets["data"]
-                    st.session_state.df = new_df
-                    msg["data_note"] = (f"✅ Dataset updated: {df.shape[0]}×{df.shape[1]} → "
-                                        f"{new_df.shape[0]}×{new_df.shape[1]}")
-            except Exception as e:
-                msg = {"role": "assistant", "content": f"⚠️ Something went wrong: {e}"}
+        # Live steps: each tool call is added to this box as soon as it finishes.
+        status = st.status("🧠 Working on it...", expanded=True)
+        live_steps = []
+        ctx = get_script_run_ctx()
+
+        def on_step(step):
+            # Tools run in a LangGraph worker thread; attach it to this session so st calls work.
+            add_script_run_ctx(threading.current_thread(), ctx)
+            live_steps.append(step)
+            status.update(label=f"🧠 Working... step {len(live_steps)}: {step.tool}")
+            with status:
+                show_step(len(live_steps), step)
+
+        try:
+            reply = agent.ask(prompt, {"data": df}, on_step=on_step)
+            status.update(label=steps_label(reply.steps) if reply.steps else "✅ Done",
+                          state="complete", expanded=False)
+            msg = {"role": "assistant", "content": reply.answer,
+                   "charts": reply.charts, "steps": reply.steps}
+            if reply.data_changed:
+                new_df = reply.datasets["data"]
+                st.session_state.df = new_df
+                msg["data_note"] = (f"✅ Dataset updated: {df.shape[0]}×{df.shape[1]} → "
+                                    f"{new_df.shape[0]}×{new_df.shape[1]}")
+        except Exception as e:
+            status.update(label="⚠️ Stopped with an error", state="error", expanded=False)
+            msg = {"role": "assistant", "content": f"⚠️ Something went wrong: {e}",
+                   "steps": live_steps}
 
     # Save first, then rerun so the chat, sidebar and preview all show the new state.
     st.session_state.chat_messages.append(msg)
