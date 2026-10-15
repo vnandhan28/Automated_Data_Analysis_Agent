@@ -1,45 +1,41 @@
-import re
+"""Code execution layer for the data agent.
+
+The agent (see langchain_agent.py) writes small pieces of pandas / DuckDB code.
+This module checks that code, runs it against the user's datasets and returns
+what happened: printed output, a chart or cleaned data, or an error message the
+agent can read and fix.
+
+Note: the checks below block the obvious ways to escape (imports, file access,
+dunder tricks), but in-process Python can never be a perfect sandbox. If the
+app is public, also run it inside a container with no secrets on disk.
+"""
+
 import ast
 import io
 import traceback
-from dataclasses import dataclass
-from typing import Dict, Any, Optional
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import redirect_stdout
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
-import pandas as pd
-import numpy as np
-import duckdb
-import matplotlib.pyplot as plt
-import plotly.express as px
 import altair as alt
-from openai import OpenAI
+import duckdb
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import plotly.express as px  # noqa: E402
+import plotly.graph_objects as go  # noqa: E402
+
+MAX_OUTPUT_CHARS = 4000
 
 
-
-def create_client(api_key: str):
-    return OpenAI(
-        base_url="https://router.huggingface.co/v1",
-        api_key=api_key,
-    )
-
-
-
-@dataclass
-class GenRequest:
-    question: str
-    datasets: Dict[str, Any]
-    prefer: Optional[str] = None
-
-
-@dataclass
-class GenResponse:
-    code: str
-    thoughts: Optional[str] = None
-
+# ---------------------------------------------------------------- results
 
 @dataclass
 class ChartResult:
-    kind: str
+    kind: str  # "plotly" | "matplotlib" | "altair" | "data_prep"
     obj: Any
     explanation: str
     modified_datasets: Optional[Dict[str, Any]] = None
@@ -58,203 +54,192 @@ def as_altair(chart, explanation: str) -> ChartResult:
 
 
 def as_data_prep(datasets: Dict[str, Any], explanation: str) -> ChartResult:
-    return ChartResult(kind="data_prep", obj=None, explanation=explanation, modified_datasets=datasets)
+    return ChartResult(kind="data_prep", obj=None, explanation=explanation,
+                       modified_datasets=datasets)
 
 
-def _strip_code_fences(s: str) -> str:
-    return re.sub(r"^```(?:python)?\s*|```$", "", s.strip(), flags=re.DOTALL).strip()
+@dataclass
+class RunOutcome:
+    ok: bool
+    output: str = ""
+    result: Optional[ChartResult] = None
+    error: Optional[str] = None
 
 
-def normalize_str_series(s):
-    return s.str.strip().str.lower()
-
-
-def get_dataset_schema(dfs: Dict[str, Any]) -> str:
-    lines = []
-    for name, df in dfs.items():
-        lines.append(f"Dataset: {name}")
-        for col in df.columns:
-            dtype = df[col].dtype
-            lines.append(f"  - {col} ({dtype})")
-    return "\n".join(lines)
-
-
-def get_dataset_samples(dfs: Dict[str, Any], num_rows=5):
-    lines = []
-    for name, df in dfs.items():
-        try:
-            sample = df.head(num_rows).to_string(index=False)
-            lines.append(f"Dataset: {name}\n{sample}")
-        except:
-            pass
-    return "\n\n".join(lines)
-
-
-class HFRouterCodeGenerator:
-    def __init__(self, client: OpenAI, model="moonshotai/Kimi-K2-Instruct-0905"):
-        self.client = client
-        self.model = model
-
-    def generate(self, req: GenRequest) -> GenResponse:
-        system_prompt = """
-You are a data assistant that generates clean, safe Python or SQL *Python code* to answer questions about tabular data, including visualization and data preparation (cleaning, renaming, filtering).
-
-Hard rules (must follow):
-- ONLY return plain Python code. No markdown, no comments, no extra text.
-- Do not write imports. The following are already available: pd, np, duckdb, plt, px, alt, ChartResult, as_plotly, as_matplotlib, as_altair, as_data_prep, and a SQL helper named `sql`.
-- If using SQL, run queries via: df = sql.query("SELECT ...")
-- If using pandas only, that’s fine too.
-- You MUST set a variable `result: ChartResult` by calling one of:
-  result = as_plotly(fig, "explanation")
-  result = as_matplotlib(fig, "explanation")
-  result = as_altair(chart, "explanation")
-  result = as_data_prep({"dataset_name": modified_df}, "explanation") # For data cleaning/transformation
-- When using `as_data_prep`, provide the full dictionary of datasets, even if only one is modified.
-- Never write to disk, never use eval/exec/open/input.
-
-Hints:
-- Available datasets (tables) are provided in the prompt.
-- You can inspect schemas using: sql.describe("table_name")
-"""
-        schema_hint = get_dataset_schema(req.datasets)
-        sample_hint = get_dataset_samples(req.datasets)
-
-        user_prompt = f"""
-        Question: {req.question}
-
-        Available datasets: {list(req.datasets.keys())}
-
-        Schema:
-        {schema_hint}
-
-        Samples:
-        {sample_hint}
-
-        Instructions:
-        Generate valid Python code (pandas or DuckDB SQL) to solve the task.
-        Use only available columns from the schema above.
-        Return Python code that sets result: ChartResult using as_plotly, as_matplotlib, as_altair, or as_data_prep.
-        """
-
-        chat = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.2,
-        )
-
-        code = _strip_code_fences(chat.choices[0].message.content)
-        return GenResponse(code=code)
-
+# ---------------------------------------------------------------- safety
 
 SAFE_BUILTINS = {
-    "abs": abs, "all": all, "any": any, "enumerate": enumerate, "len": len,
-    "min": min, "max": max, "range": range, "sum": sum, "sorted": sorted,
-    "zip": zip, "round": round, "__import__": __import__,
+    name: __builtins__[name] if isinstance(__builtins__, dict) else getattr(__builtins__, name)
+    for name in [
+        "abs", "all", "any", "bool", "dict", "divmod", "enumerate", "filter", "float",
+        "format", "int", "isinstance", "len", "list", "map", "max", "min", "print",
+        "range", "repr", "reversed", "round", "set", "slice", "sorted", "str", "sum",
+        "tuple", "type", "zip", "Exception", "ValueError", "KeyError", "TypeError",
+        "True", "False", "None",
+    ]
 }
 
+BLOCKED_NAMES = {
+    "eval", "exec", "compile", "open", "input", "globals", "locals", "vars",
+    "getattr", "setattr", "delattr", "__import__", "breakpoint", "help", "memoryview",
+}
 
-def assert_readonly(sql: str):
-    if not sql.strip().lower().startswith("select"):
-        raise ValueError("Only SELECT queries allowed.")
+# Attributes that reach the file system, OS or interpreter internals.
+BLOCKED_ATTRS = {
+    "os", "sys", "subprocess", "system", "popen", "builtins", "importlib",
+    "load", "loads", "fromfile", "tofile", "savefig", "save", "write_html",
+    "connect", "execute", "eval", "format", "format_map", "lib",
+}
+BLOCKED_ATTR_PREFIXES = ("read_", "write_", "to_csv", "to_excel", "to_parquet", "to_feather",
+                         "to_hdf", "to_sql", "to_stata", "to_pickle", "to_clipboard")
 
 
-class _QueryResultWrapper:
-    def __init__(self, df):
-        self._df = df
-
-    @property
-    def df(self):
-        return self._df
+class UnsafeCodeError(Exception):
+    pass
 
 
-def run_python_chart(code: str, datasets: Dict[str, Any]):
+def check_code(code: str) -> None:
+    """Raise UnsafeCodeError if the code uses anything we don't allow."""
     try:
-        class SQLProxy:
-            def __init__(self, dfs):
-                self._con = duckdb.connect(":memory:")
-                for name, df in dfs.items():
-                    self._con.register(name, df)
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        raise UnsafeCodeError(f"Syntax error: {e}") from e
 
-            def query(self, sql_text: str):
-                assert_readonly(sql_text)
-                df = self._con.query(sql_text).to_df()
-                return df
-
-        sql = SQLProxy(datasets)
-
-        env = {
-            "__builtins__": SAFE_BUILTINS,
-            "pd": pd, "np": np, "duckdb": duckdb,
-            "plt": plt, "px": px, "alt": alt,
-            "sql": sql,
-            "ChartResult": ChartResult,
-            "as_plotly": as_plotly,
-            "as_matplotlib": as_matplotlib,
-            "as_altair": as_altair,
-            "as_data_prep": as_data_prep,
-            "normalize_str_series": normalize_str_series,
-            "sql": sql,
-
-        }
-
-        local_ns = {}
-        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            exec(code, env, local_ns)
-
-        result = local_ns.get("result")
-        if not isinstance(result, ChartResult):
-            raise ValueError("Generated code must assign `result = ...`")
-
-        return result
-
-    except Exception:
-        raise RuntimeError(traceback.format_exc())
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            raise UnsafeCodeError("Imports are not allowed. pd, np, px, go, plt, alt and sql are already available.")
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            raise UnsafeCodeError("global/nonlocal are not allowed.")
+        if isinstance(node, ast.Name):
+            if node.id in BLOCKED_NAMES or node.id.startswith("__"):
+                raise UnsafeCodeError(f"Use of '{node.id}' is not allowed.")
+        if isinstance(node, ast.Attribute):
+            a = node.attr
+            if a.startswith("_") or a in BLOCKED_ATTRS or a.startswith(BLOCKED_ATTR_PREFIXES):
+                raise UnsafeCodeError(f"Use of '.{a}' is not allowed (no file, OS or internal access).")
 
 
-class Agent:
-    def __init__(self, client: OpenAI, model="moonshotai/Kimi-K2-Instruct-0905"):
-        self.codegen = HFRouterCodeGenerator(client, model)
-        self.history = []  
+# ---------------------------------------------------------------- SQL helper
 
-    def answer(self, question: str, dfs: Dict[str, Any]):
+class SQLProxy:
+    """Read-only DuckDB over the in-memory datasets. File access is switched off."""
 
-        continuation_keywords = [
-            "now", "again", "also", "same", "continue", "compare",
-            "filter", "only", "add", "change", "modify", "redo",
-            "use previous", "previous", "last"
-        ]
+    def __init__(self, dfs: Dict[str, Any]):
+        self._con = duckdb.connect(":memory:")
+        for name, df in dfs.items():
+            self._con.register(name, df)
+        self._con.execute("SET enable_external_access = false")
+        self._con.execute("SET lock_configuration = true")
 
-        q_lower = question.lower()
+    def query(self, sql_text: str) -> pd.DataFrame:
+        first = sql_text.strip().lstrip("(").split(None, 1)[0].lower() if sql_text.strip() else ""
+        if first not in ("select", "with", "describe", "summarize"):
+            raise ValueError("Only read queries (SELECT / WITH / DESCRIBE / SUMMARIZE) are allowed.")
+        return self._con.query(sql_text).to_df()
 
-        is_continuation = any(kw in q_lower for kw in continuation_keywords)
+    def describe(self, table: str) -> pd.DataFrame:
+        return self.query(f'DESCRIBE "{table}"')
 
-        if not is_continuation:
-            self.history = []  
-
-        self.history.append({"role": "user", "content": question})
+    def close(self):
+        self._con.close()
 
 
-        limited_history = self.history[-4:]
+# ---------------------------------------------------------------- runner
 
-        combined_question = ""
-        for turn in limited_history:
-            combined_question += f"{turn['role'].upper()}: {turn['content']}\n"
+def _short_error(exc: BaseException, code: str) -> str:
+    """Error message plus the failing line of the agent's code."""
+    msg = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+    line_no = None
+    for frame in traceback.extract_tb(exc.__traceback__):
+        if frame.filename == "<agent_code>":
+            line_no = frame.lineno
+    if line_no:
+        lines = code.splitlines()
+        if 0 < line_no <= len(lines):
+            return f"Line {line_no}: {lines[line_no - 1].strip()}\n{msg}"
+    return msg
 
-        req = GenRequest(
-            question=combined_question,
-            datasets=dfs
-        )
 
- 
-        gen = self.codegen.generate(req)
-        result = run_python_chart(gen.code, dfs)
+def run_code(code: str, datasets: Dict[str, Any]) -> RunOutcome:
+    """Run agent-written code. Never raises: errors come back in RunOutcome."""
+    code = strip_code_fences(code)
+    try:
+        check_code(code)
+    except UnsafeCodeError as e:
+        return RunOutcome(ok=False, error=f"Code rejected: {e}")
 
-        self.history.append({
-            "role": "assistant",
-            "content": result.explanation
-        })
+    sql = SQLProxy(datasets)
+    env: Dict[str, Any] = {
+        "__builtins__": SAFE_BUILTINS,
+        "pd": pd, "np": np, "px": px, "go": go, "plt": plt, "alt": alt,
+        "sql": sql,
+        "ChartResult": ChartResult,
+        "as_plotly": as_plotly, "as_matplotlib": as_matplotlib,
+        "as_altair": as_altair, "as_data_prep": as_data_prep,
+    }
+    # Datasets are also available directly by name, as copies so failed code
+    # can't half-modify the real data.
+    for name, df in datasets.items():
+        if name.isidentifier():
+            env[name] = df.copy()
 
-        return result
+    buf = io.StringIO()
+    figs_before = set(plt.get_fignums())
+    try:
+        with redirect_stdout(buf):
+            exec(compile(code, "<agent_code>", "exec"), env)  # noqa: S102 - checked above
+        output = buf.getvalue()
+        if len(output) > MAX_OUTPUT_CHARS:
+            output = output[:MAX_OUTPUT_CHARS] + "\n... (output cut off)"
+        result = env.get("result")
+        if result is not None and not isinstance(result, ChartResult):
+            return RunOutcome(ok=False, output=output,
+                              error="`result` must be made with as_plotly / as_matplotlib / as_altair / as_data_prep.")
+        return RunOutcome(ok=True, output=output, result=result)
+    except Exception as exc:
+        return RunOutcome(ok=False, output=buf.getvalue()[:MAX_OUTPUT_CHARS], error=_short_error(exc, code))
+    finally:
+        sql.close()
+        # Detach new figures from pyplot so they don't pile up in memory.
+        # A closed Figure object can still be shown and saved.
+        for num in set(plt.get_fignums()) - figs_before:
+            plt.close(num)
+
+
+# ---------------------------------------------------------------- data overview
+
+def strip_code_fences(s: str) -> str:
+    s = s.strip()
+    if s.startswith("```"):
+        s = s.split("\n", 1)[1] if "\n" in s else ""
+    if s.endswith("```"):
+        s = s[: -3]
+    return s.strip()
+
+
+def describe_datasets(dfs: Dict[str, Any], column: Optional[str] = None, sample_rows: int = 5) -> str:
+    """Text overview the agent reads before writing code."""
+    parts: List[str] = []
+    for name, df in dfs.items():
+        if column:
+            if column not in df.columns:
+                parts.append(f"Dataset '{name}' has no column '{column}'. Columns: {list(df.columns)}")
+                continue
+            s = df[column]
+            lines = [f"Column '{column}' in '{name}' ({s.dtype})",
+                     f"nulls: {int(s.isna().sum())} of {len(s)}, unique values: {s.nunique()}"]
+            if pd.api.types.is_numeric_dtype(s):
+                lines.append(s.describe().to_string())
+            else:
+                lines.append("most common values:\n" + s.value_counts().head(15).to_string())
+            parts.append("\n".join(lines))
+            continue
+
+        lines = [f"Dataset '{name}': {df.shape[0]} rows x {df.shape[1]} columns", "Columns:"]
+        for col in df.columns:
+            s = df[col]
+            lines.append(f"  - {col} ({s.dtype}), nulls={int(s.isna().sum())}, unique={s.nunique()}")
+        lines.append(f"First {sample_rows} rows:")
+        lines.append(df.head(sample_rows).to_string(index=False, max_colwidth=40))
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
