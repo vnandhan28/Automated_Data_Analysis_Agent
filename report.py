@@ -85,7 +85,7 @@ def _steps_html(steps) -> str:
         return ""
     parts = []
     for i, s in enumerate(steps, 1):
-        label = {"critic": "🧐 critic", "memory": "🧠 memory"}.get(s.tool, s.tool)
+        label = {"critic": "🧐 critic", "memory": "🧠 memory", "ask_user": "❓ asked the user"}.get(s.tool, s.tool)
         code = f"<pre>{html.escape(s.code)}</pre>" if s.code and s.tool not in ("inspect_data",) else ""
         parts.append(f'<div class="step{"" if s.ok else " bad"}"><div class="name">{i}. '
                      f'{"✅" if s.ok else "⚠️"} {html.escape(label)}</div>{code}'

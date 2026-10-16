@@ -23,6 +23,7 @@
 | 🔍 | **Root-cause finder** — which segments drove a change | *"Why did revenue drop from March to April?"* |
 | 📋 | **One-click auto report** — overview, 3 charts, key insights, drivers | **Analyze this dataset** button |
 | 🧐 | **Critic agent** — a second LLM reviews every answer and the agent fixes problems | Catches wrong numbers and unsupported claims |
+| ❓ | **Asks when unclear** — instead of guessing between columns or definitions, it asks you (with one-click options) and can remember your answer | *"Average rating?"* → *"Driver Ratings or Customer Rating?"* |
 | 🧠 | **Learning memory** — rules you teach it are applied to related questions | `remember: revenue = Booking Value of completed rides only` |
 | 🔧 | **Live steps** — watch each tool call and its code as it happens | Expand **Agent steps** |
 | 📄 | **Export** — the whole session as an interactive HTML report | **Download report** in the sidebar |

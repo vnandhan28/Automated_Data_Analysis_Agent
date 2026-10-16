@@ -26,7 +26,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 
-from AgentClass import ChartResult, describe_datasets, run_code
+from AgentClass import RESERVED_NAMES, ChartResult, describe_datasets, run_code
 from rootcause import format_root_cause, root_cause
 
 # LLM providers (all OpenAI-compatible). "key" is the secrets.toml entry holding the API key;
@@ -62,7 +62,9 @@ CRITIC_OUTPUT_BUDGET = 16000  # characters of tool output the critic sees in tot
 
 SYSTEM_PROMPT = """You are a data analysis agent. The user has loaded tabular data and asks questions about it.
 
-Datasets are pandas DataFrames available in your code by name (usually `data`).
+Datasets are pandas DataFrames available in your code by their names (inspect_data lists them).
+If there are several datasets, inspect_data also suggests join columns. Combine them with
+pd.merge(a, b, on=..., how="left") or SQL JOINs; check the row count after a join.
 
 How to work:
 1. If you are not sure about column names, types or values, call inspect_data first.
@@ -71,15 +73,20 @@ How to work:
 4. Use update_dataset only when the user asks to clean, filter, rename or otherwise change the data.
    Use explain_change when the user asks WHY a metric differs between two periods or groups
    (e.g. "why did revenue drop in April?"). To chart its breakdown, in make_chart code use
-   table, summary = root_cause(data, metric, split_column, group_a, group_b, agg)
+   table, summary = root_cause(<dataset>, metric, split_column, group_a, group_b, agg)
    (table columns: column, segment, A, B, contribution, pct_of_change, expected, unexpected).
 5. If a tool returns an error, read it, fix the code and try again. Do not repeat the same code.
+   Ask instead of guessing: after inspecting the data, if you would have to CHOOSE between two or more
+   columns or definitions that give different numbers, call ask_user with one short question and the
+   choices as options. Example: the user says "region" but the data has "Pickup Location" and
+   "Drop Location" -> ask which one. Don't ask when only one reading makes sense, when a saved rule
+   settles it, or when the user already answered in this conversation.
 6. Finish with a short answer in simple words: what you found and the key numbers. Don't paste code in the answer.
    Charts are shown to the user automatically; don't add image links or markdown images.
 
 Code rules (all tools that take code):
 - Plain Python only. No imports: pd, np, px (plotly.express), go (plotly.graph_objects), plt, alt (altair) are ready.
-- SQL: df = sql.query("SELECT ... FROM data ...") (DuckDB, read-only).
+- SQL: df = sql.query('SELECT ... FROM <dataset> ...') (DuckDB, read-only; quote column names with spaces: "Vehicle Type").
 - No file, OS or network access. No names starting with underscore.
 - make_chart code must end with one of:
     result = as_plotly(fig, "one-sentence explanation")
@@ -87,13 +94,15 @@ Code rules (all tools that take code):
     result = as_altair(chart, "one-sentence explanation")
   Prefer plotly. Give the chart a clear title and axis labels.
 - update_dataset code must end with:
-    result = as_data_prep({"data": new_df}, "what changed")
+    result = as_data_prep({"<dataset name>": new_df}, "what changed")
+  To keep a joined or derived table for later questions, use a NEW name, e.g.
+    result = as_data_prep({"rides_with_prices": merged}, "joined rides with vehicle prices")
 """
 
 
 AUTO_REPORT_LABEL = "📋 Analyze this dataset"
 AUTO_REPORT_PROMPT = """Analyze this dataset on your own and write a short report.
-Don't change the dataset (no update_dataset); only read it.
+Don't change the dataset (no update_dataset); only read it. Don't ask the user questions; pick sensible defaults.
 
 1. Call inspect_data to understand the columns.
 2. Use run_analysis for the key facts: size, missing values, main numeric columns, top categories.
@@ -122,6 +131,7 @@ Check only these things:
 2. Every number in the final answer appears in, or follows directly from, the tool outputs. Rounding is fine.
 3. No overclaiming: no causes, trends or certainty that the outputs don't support.
 4. If a chart was asked for, a successful make_chart step exists.
+5. If the question lists saved rules from the user, the code and answer follow the ones that apply.
 
 Charts from make_chart are shown to the user automatically next to the answer, so the answer
 text should NOT contain the chart itself. A short description of the chart is correct.
@@ -155,6 +165,7 @@ class AgentReply:
     steps: List[Step] = field(default_factory=list)
     datasets: Dict[str, Any] = field(default_factory=dict)
     data_changed: bool = False
+    clarification: Optional[Dict[str, Any]] = None  # {"question", "options"} if the agent asked the user
 
 
 def _chart_problem(result: ChartResult) -> Optional[str]:
@@ -234,6 +245,7 @@ class DataAgent:
         self.steps: List[Step] = []
         self.failed_runs = 0
         self.data_changed = False
+        self.clarification: Optional[Dict[str, Any]] = None
         self.on_step = on_step
 
     def _log(self, tool: str, code: str, ok: bool, output: str) -> str:
@@ -294,7 +306,7 @@ class DataAgent:
                          f"Chart created and shown to the user ({r.kind}). {summary}\nExplanation: {r.explanation}")
 
     def update_dataset(self, code: str) -> str:
-        """Clean or transform data (drop nulls, rename, filter, add columns...). Code must set result = as_data_prep({"data": new_df}, "what changed"). Later steps use the new data."""
+        """Clean or transform data (drop nulls, rename, filter, add columns, join...). Code must set result = as_data_prep({"<dataset name>": new_df}, "what changed"). A new name creates a new dataset (e.g. a joined table). Later steps use the new data."""
         if (stop := self._out_of_attempts("update_dataset", code)):
             return stop
         res = run_code(code, self.datasets)
@@ -303,45 +315,68 @@ class DataAgent:
         r = res.result
         if r is None or r.kind != "data_prep" or not r.modified_datasets:
             return self._failed("update_dataset", code,
-                                'Data was not updated. Set result = as_data_prep({"data": new_df}, "what changed").')
+                                'Data was not updated. Set result = as_data_prep({"<dataset name>": new_df}, "what changed").')
         changes = []
         for name, new_df in r.modified_datasets.items():
-            if name not in self.datasets:
-                return self._failed("update_dataset", code,
-                                    f"Unknown dataset '{name}'. Use one of: {list(self.datasets)}")
             if not isinstance(new_df, pd.DataFrame):
                 return self._failed("update_dataset", code, f"'{name}' must be a pandas DataFrame.")
-            old = self.datasets[name]
-            changes.append(f"{name}: {old.shape[0]}x{old.shape[1]} -> {new_df.shape[0]}x{new_df.shape[1]}, "
-                           f"columns: {list(new_df.columns)}")
+            if name not in self.datasets:  # a new dataset, e.g. a joined table
+                if not str(name).isidentifier() or name in RESERVED_NAMES:
+                    return self._failed("update_dataset", code,
+                                        f"'{name}' can't be a dataset name. Use letters, digits and _ "
+                                        f"(not {sorted(RESERVED_NAMES)}).")
+                changes.append(f"new dataset {name}: {new_df.shape[0]}x{new_df.shape[1]}, "
+                               f"columns: {list(new_df.columns)}")
+            else:
+                old = self.datasets[name]
+                changes.append(f"{name}: {old.shape[0]}x{old.shape[1]} -> {new_df.shape[0]}x{new_df.shape[1]}, "
+                               f"columns: {list(new_df.columns)}")
             self.datasets[name] = new_df
         self.data_changed = True
         return self._log("update_dataset", code, True,
                          "Dataset updated. " + "; ".join(changes) + f"\nExplanation: {r.explanation}")
 
     def explain_change(self, metric: str, split_column: str, group_a: str, group_b: str,
-                       agg: str = "sum", dataset: str = "data") -> str:
+                       agg: str = "sum", dataset: str = "") -> str:
         """Root-cause finder: why did a metric change between two groups or periods?
         Compares agg ('sum', 'mean' or 'count') of `metric` for split_column == group_a vs group_b,
         breaks the change down by every other column and ranks the segments that caused most of it.
         For periods, pass the date column itself with prefixes: split_column='Date',
-        group_a='2024-03', group_b='2024-04' (no need to add a month column). For row counts use agg='count'."""
+        group_a='2024-03', group_b='2024-04' (no need to add a month column). For row counts use agg='count'.
+        `dataset` is the dataset name; it can be left empty when only one dataset is loaded."""
         call = (f"explain_change(metric={metric!r}, split_column={split_column!r}, "
                 f"group_a={group_a!r}, group_b={group_b!r}, agg={agg!r})")
         if (stop := self._out_of_attempts("explain_change", call)):
             return stop
+        if not dataset and len(self.datasets) == 1:
+            dataset = next(iter(self.datasets))
         if dataset not in self.datasets:
-            return self._failed("explain_change", call, f"Unknown dataset '{dataset}'. Use one of: {list(self.datasets)}")
+            return self._failed("explain_change", call, f"Unknown or missing dataset '{dataset}'. "
+                                                        f"Pass dataset= one of: {list(self.datasets)}")
         try:
             table, summary = root_cause(self.datasets[dataset], metric, split_column, group_a, group_b, agg)
         except ValueError as e:
             return self._failed("explain_change", call, str(e))
         return self._log("explain_change", call, True, format_root_cause(table, summary))
 
+    def ask_user(self, question: str, options: Optional[List[str]] = None) -> str:
+        """Ask the user ONE short clarifying question instead of guessing, then stop and wait.
+        Only use it when the request is ambiguous in a way that changes the answer and the data
+        can't settle it (e.g. a column the user names doesn't exist, or a term like 'revenue' or
+        'active customer' has several plausible meanings). Give 2-4 short suggested answers in
+        `options` when you can (e.g. real column names)."""
+        options = [str(o).strip() for o in (options or []) if str(o).strip()][:4]
+        self.clarification = {"question": question.strip(), "options": options}
+        self._log("ask_user", "", True, question.strip()
+                  + "".join(f"\n- {o}" for o in options))
+        return question.strip()
+
     def _make_tools(self):
-        return [StructuredTool.from_function(func=f) for f in
-                (self.inspect_data, self.run_analysis, self.make_chart, self.update_dataset,
-                 self.explain_change)]
+        tools = [StructuredTool.from_function(func=f) for f in
+                 (self.inspect_data, self.run_analysis, self.make_chart, self.update_dataset,
+                  self.explain_change)]
+        # return_direct: the agent loop ends right after asking, so the user can answer.
+        return tools + [StructuredTool.from_function(func=self.ask_user, return_direct=True)]
 
     # ------------------------------------------------------------ main entry
 
@@ -383,16 +418,25 @@ class DataAgent:
     # ------------------------------------------------------------ main entry
 
     def ask(self, question: str, datasets: Dict[str, Any],
-            on_step: Optional[Callable[[Step], None]] = None, critic: bool = False) -> AgentReply:
+            on_step: Optional[Callable[[Step], None]] = None, critic: bool = False,
+            rules: Optional[List[str]] = None) -> AgentReply:
         """Answer one question. on_step(step) is called after every tool call.
         With critic=True a second LLM call reviews the answer; if it finds problems
-        the agent gets one chance to fix them."""
+        the agent gets one chance to fix them. `rules` are the user's saved rules
+        relevant to this question (from memory.py); the agent must follow them."""
         self._reset_turn(datasets, on_step)
-        messages = self.history[-MAX_HISTORY_MESSAGES:] + [HumanMessage(question)]
+        full_question = question
+        if rules:
+            self._log("memory", "", True, "Using saved rules:\n" + "\n".join(f"- {r}" for r in rules))
+            full_question = ("The user saved these rules earlier. Follow them where they apply:\n"
+                             + "\n".join(f"- {r}" for r in rules) + f"\n\nQuestion: {question}")
+        messages = self.history[-MAX_HISTORY_MESSAGES:] + [HumanMessage(full_question)]
 
         answer, convo = self._run(messages)
-        if answer is not None and critic:
-            verdict = self._critique(question, answer, self.steps)
+        if self.clarification:  # the agent is waiting for the user: nothing to review yet
+            answer = self.clarification["question"]
+        elif answer is not None and critic:
+            verdict = self._critique(full_question, answer, self.steps)
             if verdict["ok"]:
                 self._log("critic", "", True, verdict.get("note", "Looks correct: the code matches the question "
                                                                   "and the numbers match the tool outputs."))
@@ -416,7 +460,8 @@ class DataAgent:
 
         self.history += [HumanMessage(question), AIMessage(answer)]
         return AgentReply(answer=answer, charts=self.charts, steps=self.steps,
-                          datasets=self.datasets, data_changed=self.data_changed)
+                          datasets=self.datasets, data_changed=self.data_changed,
+                          clarification=self.clarification)
 
     def clear(self):
         self.history = []
