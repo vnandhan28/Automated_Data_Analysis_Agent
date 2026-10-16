@@ -2,7 +2,7 @@
 
 **Ask questions about a CSV or Excel file in plain English. The agent explores the data, writes and runs pandas/SQL code, draws charts, explains *why* numbers changed, and checks its own work before answering.**
 
-[![Live demo](https://img.shields.io/badge/Live%20demo-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://YOUR-APP.streamlit.app)
+[![Live demo](https://img.shields.io/badge/Live%20demo-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://vnandhan-data-agent.streamlit.app/)
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![LangChain](https://img.shields.io/badge/LangChain-agents-1C3C3C)
 ![Eval](https://img.shields.io/badge/eval-21%2F21%20correct-2ea44f)
@@ -19,6 +19,7 @@
 | 💬 | **Plain-English analysis** | *"Which vehicle type has the highest average booking value?"* |
 | 📈 | **Charts** (Plotly, Matplotlib, Altair), checked so they're never empty | *"Stacked area chart of Movies vs TV Shows per year"* |
 | 🧹 | **Data cleaning** with one-click undo | *"Drop rows where Booking Value is missing"* |
+| 🔗 | **Multiple files & joins** — upload several tables; the agent finds join keys and merges them | *"Join the rides with the vehicle prices; which category has most completed rides?"* |
 | 🔍 | **Root-cause finder** — which segments drove a change | *"Why did revenue drop from March to April?"* |
 | 📋 | **One-click auto report** — overview, 3 charts, key insights, drivers | **Analyze this dataset** button |
 | 🧐 | **Critic agent** — a second LLM reviews every answer and the agent fixes problems | Catches wrong numbers and unsupported claims |
@@ -45,10 +46,10 @@ The LLM works in a loop with five tools. Every tool returns plain text, and if c
 
 | Tool | What it does |
 |---|---|
-| `inspect_data` | Columns, types, nulls, sample rows, or details for one column |
-| `run_analysis` | Runs pandas or DuckDB SQL code and reads the printed result |
+| `inspect_data` | Columns, types, nulls, sample rows, or details for one column; with several datasets it also suggests join keys (shared columns, % of values that match, one-to-many or many-to-many) |
+| `run_analysis` | Runs pandas or DuckDB SQL code (joins across datasets included) and reads the printed result |
 | `make_chart` | Builds a chart and checks it actually contains data |
-| `update_dataset` | Cleans or transforms the data; later steps see the new version |
+| `update_dataset` | Cleans or transforms a dataset, or saves a new one (e.g. a joined table); later steps see the new version |
 | `explain_change` | Breaks a metric's change between two periods/groups down by every column and ranks the segments that caused it |
 
 **Root-cause finder.** For a sum, count or average compared between group A and group B, every other column is split into segments and each segment's contribution is computed (contributions add up exactly to the total change). Segments are ranked by their *unexpected* change — the part their size alone doesn't explain — so a segment isn't blamed just for being big. For averages the change is split into a rate effect (the segment's own average moved) and a mix effect (rows shifted towards it).
@@ -64,6 +65,7 @@ The LLM works in a loop with five tools. Every tool returns plain text, and if c
 | Model | Critic | Correct | Avg. time |
 |---|---|---|---|
 | `openai/gpt-oss-120b` (Groq) | off | **21 / 21** | 25 s |
+| `openai/gpt-oss-20b` (Groq) | off / on | **27 / 27** run so far | 34–42 s |
 
 ```bash
 python eval/run_eval.py                                   # run (resumes where it stopped)
@@ -96,7 +98,7 @@ HF_key = ""                     # https://huggingface.co/settings/tokens
 SAVE_MEMORY = true              # keep saved rules on disk (leave out on a public deployment)
 ```
 
-Then pick a sample dataset (cancer risk factors, Netflix titles, Uber bookings) or upload your own.
+Then pick a sample dataset (cancer risk factors, Netflix titles, Uber bookings, or Uber bookings + a small vehicle price table to try joins) or upload one or more files of your own. `vehicle_types.csv` is a made-up companion table for the join demo.
 
 ## 🗂️ Project structure
 
