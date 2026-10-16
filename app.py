@@ -1,11 +1,15 @@
 import io
 import threading
+import time
 
 import pandas as pd
 import streamlit as st
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 from langchain_agent import AUTO_REPORT_LABEL, AUTO_REPORT_PROMPT, DEFAULT_PROVIDER, PROVIDERS, DataAgent
+from memory import DEFAULT_PATH as MEMORY_PATH
+from memory import RuleMemory, gemini_embedder, parse_remember
+from report import build_report
 
 st.set_page_config(page_title="AI Data Analysis Agent", layout="wide", page_icon="📊")
 
@@ -73,7 +77,16 @@ if current is None or (current.provider, current.model) != (provider, model):
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = []
 
+# Learning memory. Rules are saved to disk only with SAVE_MEMORY = true (local use); on the
+# public app each visitor keeps their own rules for the session, so nobody can change others' answers.
+if "rule_memory" not in st.session_state:
+    gemini_key = st.secrets.get("GEMINI_key", "").strip()
+    st.session_state.rule_memory = RuleMemory(
+        path=MEMORY_PATH if st.secrets.get("SAVE_MEMORY", False) else None,
+        embed=gemini_embedder(gemini_key) if gemini_key else None)
+
 agent: DataAgent = st.session_state.agent
+rule_memory: RuleMemory = st.session_state.rule_memory
 
 # ---------------------------------------------------------------- data loading
 # Data is only (re)loaded when the user picks a *different* sample or uploads a
@@ -113,6 +126,16 @@ with st.sidebar:
         agent.clear()
         st.rerun()
 
+    if st.session_state.chat_messages:
+        report_html = build_report(st.session_state.chat_messages, {
+            "Dataset": st.session_state.get("data_label", ""),
+            "Size": f"{df.shape[0]:,} rows × {df.shape[1]} columns" if df is not None else "",
+            "Model": f"{agent.provider} / {agent.model}",
+        })
+        st.download_button("📄 Download report (HTML)", report_html,
+                           f"analysis_report_{time.strftime('%Y%m%d_%H%M')}.html", "text/html",
+                           width="stretch", help="All questions, answers, charts and agent steps in one file.")
+
     if df is not None and df is not st.session_state.get("df_original"):
         if st.button("↩️ Undo all data changes", width="stretch"):
             st.session_state.df = st.session_state.df_original
@@ -128,7 +151,26 @@ with st.sidebar:
                 st.write(f"- **{col}** ({df[col].dtype}) | {int(df[col].isna().sum())} nulls")
 
     st.markdown("---")
-    st.subheader("🧠 Memory")
+    st.subheader("🧠 Saved rules")
+    st.caption("Rules and definitions the agent follows when relevant. "
+               "You can also type `remember: ...` in the chat.")
+    with st.form("add_rule", clear_on_submit=True, border=False):
+        new_rule = st.text_input("New rule", placeholder="e.g. Revenue = sum of Booking Value",
+                                 label_visibility="collapsed")
+        if st.form_submit_button("💾 Save rule", width="stretch") and new_rule.strip():
+            rule_memory.add(new_rule)
+            st.rerun()
+    for rule in rule_memory.rules:
+        text_col, del_col = st.columns([5, 1])
+        text_col.write(f"• {rule['text']}")
+        if del_col.button("🗑", key=f"del_{rule['id']}", help="Delete this rule"):
+            rule_memory.delete(rule["id"])
+            st.rerun()
+    if not rule_memory.path:
+        st.caption("Rules last for this session only.")
+
+    st.markdown("---")
+    st.subheader("💬 Recent chat")
     if not agent.history:
         st.caption("Nothing yet.")
     for msg in agent.history[-4:]:
@@ -163,6 +205,10 @@ def show_step(i: int, s):
     if s.tool == "critic":
         st.markdown(f"**{i}. 🧐 critic: {'approved' if s.ok else 'found problems'}**")
         (st.success if s.ok else st.warning)(s.output)
+        return
+    if s.tool == "memory":
+        st.markdown(f"**{i}. 🧠 memory**")
+        st.info(s.output)
         return
     st.markdown(f"**{i}. {icon} {s.tool}**")
     if s.tool == "inspect_data":
@@ -221,6 +267,15 @@ prompt = st.chat_input("Ask something about the data...")
 if "pending_prompt" in st.session_state:
     prompt = st.session_state.pop("pending_prompt")
 
+if prompt and (rule_text := parse_remember(prompt)):
+    # "remember: ..." saves a rule; no agent call needed.
+    rule_memory.add(rule_text)
+    st.session_state.chat_messages += [
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": f"💾 Saved rule: *{rule_text}*. I'll follow it in related questions."},
+    ]
+    st.rerun()
+
 if prompt:
     st.session_state.chat_messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -242,7 +297,8 @@ if prompt:
 
         try:
             question = AUTO_REPORT_PROMPT if prompt == AUTO_REPORT_LABEL else prompt
-            reply = agent.ask(question, {"data": df}, on_step=on_step, critic=use_critic)
+            rules = [r["text"] for r, _ in rule_memory.relevant(question)]
+            reply = agent.ask(question, {"data": df}, on_step=on_step, critic=use_critic, rules=rules)
             status.update(label=steps_label(reply.steps) if reply.steps else "✅ Done",
                           state="complete", expanded=False)
             msg = {"role": "assistant", "content": reply.answer,

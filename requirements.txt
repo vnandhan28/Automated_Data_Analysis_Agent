@@ -10,4 +10,5 @@ langchain>=1.0
 langchain-core
 langchain-openai
 langchain-google-genai
+markdown  # HTML report export
 tabulate  # eval/run_eval.py summary tables
