@@ -123,6 +123,26 @@ Don't change the dataset (no update_dataset); only read it. Don't ask the user q
    Missing values or other issues worth knowing.
 """
 
+PLANNER_PROMPT = """You plan the work of a data analysis agent before it starts.
+The agent's tools: inspect_data, run_analysis (pandas/SQL), make_chart, update_dataset,
+explain_change (root cause of a change between two groups/periods), ask_user.
+
+Write a short numbered plan of 2-5 steps for the user's request. One line per step, plain words,
+name the tool and the columns where you can. No code, no explanations, nothing else.
+"""
+
+# Words that suggest a request has several parts and is worth planning.
+PLAN_KEYWORDS = ("compare", "analy", "report", "overview", "explore", "breakdown", "break down",
+                 "why", "trend", "and then", "then ", "also", "versus", " vs", "insight")
+
+
+def needs_plan(question: str) -> bool:
+    """Cheap check (no LLM call) so simple questions don't pay for planning."""
+    q = question.lower()
+    return (len(q.split()) >= 18 or any(k in q for k in PLAN_KEYWORDS)
+            or q.count(" and ") >= 2 or q.count("?") >= 2)
+
+
 CRITIC_PROMPT = """You review a data analysis agent's work before the user sees it.
 You get the user's question, every tool step (code + output) and the agent's final answer.
 
@@ -132,6 +152,7 @@ Check only these things:
 3. No overclaiming: no causes, trends or certainty that the outputs don't support.
 4. If a chart was asked for, a successful make_chart step exists.
 5. If the question lists saved rules from the user, the code and answer follow the ones that apply.
+6. If the question includes a plan, every step of the plan was carried out or the answer says why not.
 
 Charts from make_chart are shown to the user automatically next to the answer, so the answer
 text should NOT contain the chart itself. A short description of the chart is correct.
@@ -417,19 +438,37 @@ class DataAgent:
 
     # ------------------------------------------------------------ main entry
 
+    def _make_plan(self, question: str) -> Optional[str]:
+        """One short LLM call that writes a numbered plan. None if it fails or looks wrong."""
+        tables = "\n".join(f"- {name} ({df.shape[0]:,} rows): {', '.join(map(str, df.columns))[:600]}"
+                           for name, df in self.datasets.items())
+        try:
+            reply = _text(self.llm.invoke([SystemMessage(PLANNER_PROMPT),
+                                           HumanMessage(f"Datasets:\n{tables}\n\nRequest:\n{question}")]).content)
+        except Exception:
+            return None  # planning is optional; never block the answer
+        steps = [line.strip() for line in reply.splitlines() if re.match(r"\s*\d+[.)]", line)]
+        return "\n".join(steps[:5]) if len(steps) >= 2 else None
+
     def ask(self, question: str, datasets: Dict[str, Any],
             on_step: Optional[Callable[[Step], None]] = None, critic: bool = False,
-            rules: Optional[List[str]] = None) -> AgentReply:
+            rules: Optional[List[str]] = None, plan: bool = False) -> AgentReply:
         """Answer one question. on_step(step) is called after every tool call.
         With critic=True a second LLM call reviews the answer; if it finds problems
         the agent gets one chance to fix them. `rules` are the user's saved rules
-        relevant to this question (from memory.py); the agent must follow them."""
+        relevant to this question (from memory.py); the agent must follow them.
+        With plan=True, bigger requests (see needs_plan) first get a short written plan."""
         self._reset_turn(datasets, on_step)
         full_question = question
         if rules:
             self._log("memory", "", True, "Using saved rules:\n" + "\n".join(f"- {r}" for r in rules))
             full_question = ("The user saved these rules earlier. Follow them where they apply:\n"
                              + "\n".join(f"- {r}" for r in rules) + f"\n\nQuestion: {question}")
+        if plan and needs_plan(question) and (steps := self._make_plan(full_question)):
+            self._log("plan", "", True, steps)
+            full_question += (f"\n\nFollow this plan step by step:\n{steps}\n"
+                              "The user can already see the plan, so in the final answer don't narrate the "
+                              "steps; just answer every part of the request concisely.")
         messages = self.history[-MAX_HISTORY_MESSAGES:] + [HumanMessage(full_question)]
 
         answer, convo = self._run(messages)

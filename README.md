@@ -25,6 +25,7 @@
 | 🧐 | **Critic agent** — a second LLM reviews every answer and the agent fixes problems | Catches wrong numbers and unsupported claims |
 | ❓ | **Asks when unclear** — instead of guessing between columns or definitions, it asks you (with one-click options) and can remember your answer | *"Average rating?"* → *"Driver Ratings or Customer Rating?"* |
 | 🧠 | **Learning memory** — rules you teach it are applied to related questions | `remember: revenue = Booking Value of completed rides only` |
+| 📝 | **Plan first** — bigger, multi-part requests get a short written plan before any tool runs; the critic checks every step was done | *"Compare Movies and TV Shows: counts, top rating of each, and a chart"* |
 | 🔧 | **Live steps** — watch each tool call and its code as it happens | Expand **Agent steps** |
 | 📄 | **Export** — the whole session as an interactive HTML report | **Download report** in the sidebar |
 | 🔌 | **Switch models** — Groq, Google Gemini or Hugging Face from the sidebar | `gpt-oss-120b`, `gemini-3.5-flash`, Llama… |

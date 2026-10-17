@@ -96,6 +96,9 @@ model = st.sidebar.selectbox("🤖 Model", model_options, index=model_index)
 use_critic = st.sidebar.toggle("🧐 Critic check", value=True,
                                help="A second LLM call reviews each answer (code, numbers, claims) "
                                     "and the agent fixes problems once. Slower, but more reliable.")
+use_plan = st.sidebar.toggle("📝 Plan first", value=True,
+                             help="For bigger, multi-part requests the agent first writes a short plan, "
+                                  "then follows it. Simple questions skip this.")
 
 current = st.session_state.get("agent")
 if current is None or (current.provider, current.model) != (provider, model):
@@ -237,14 +240,17 @@ def steps_label(steps) -> str:
     return f"🔧 Agent steps ({len(steps)}" + (f", {failed} fixed" if failed else "") + ")"
 
 
+STEP_LABELS = {"memory": "🧠 memory", "ask_user": "❓ asked you", "plan": "📝 plan"}
+
+
 def show_step(i: int, s):
     icon = "✅" if s.ok else "⚠️"
     if s.tool == "critic":
         st.markdown(f"**{i}. 🧐 critic: {'approved' if s.ok else 'found problems'}**")
         (st.success if s.ok else st.warning)(s.output)
         return
-    if s.tool in ("memory", "ask_user"):
-        st.markdown(f"**{i}. {'🧠 memory' if s.tool == 'memory' else '❓ asked you'}**")
+    if s.tool in ("memory", "ask_user", "plan"):
+        st.markdown(f"**{i}. {STEP_LABELS[s.tool]}**")
         st.info(s.output)
         return
     st.markdown(f"**{i}. {icon} {s.tool}**")
@@ -362,7 +368,8 @@ if prompt:
                             f"Now answer my original request: {original}")
             st.session_state.pending_clarification = None
             rules = [r["text"] for r, _ in rule_memory.relevant(question)]
-            reply = agent.ask(question, dict(datasets), on_step=on_step, critic=use_critic, rules=rules)
+            reply = agent.ask(question, dict(datasets), on_step=on_step, critic=use_critic, rules=rules,
+                              plan=use_plan)
             status.update(label=steps_label(reply.steps) if reply.steps else "✅ Done",
                           state="complete", expanded=False)
             msg = {"role": "assistant", "content": reply.answer,
