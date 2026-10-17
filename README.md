@@ -1,4 +1,4 @@
-# 📊 AI Data Analysis Agent
+# AI Data Analysis Agent
 
 **Ask questions about a CSV or Excel file in plain English. The agent explores the data, writes and runs pandas/SQL code, draws charts, explains *why* numbers changed, and checks its own work before answering.**
 
@@ -31,7 +31,7 @@
 | 📄 | **Export** — the whole session as an interactive HTML report | **Download report** in the sidebar |
 | 🔌 | **Switch models** — Groq, Google Gemini or Hugging Face from the sidebar | `gpt-oss-120b`, `gemini-3.5-flash`, Llama… |
 
-## 🧠 How it works
+## Work Flow
 
 ```mermaid
 flowchart LR
