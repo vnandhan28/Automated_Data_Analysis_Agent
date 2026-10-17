@@ -29,8 +29,9 @@ import plotly.express as px  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 
 from rootcause import root_cause  # noqa: E402
+from stats import run_stats  # noqa: E402
 
-MAX_OUTPUT_CHARS = 4000
+MAX_OUTPUT_CHARS = 2500  # keeps requests under free-tier per-request token limits
 
 
 # ---------------------------------------------------------------- results
@@ -185,6 +186,11 @@ def _short_error(exc: BaseException, code: str) -> str:
     return msg
 
 
+# Names the runner already uses; a dataset can't be called one of these.
+RESERVED_NAMES = {"pd", "np", "px", "go", "plt", "alt", "sql", "result", "ChartResult", "root_cause", "run_stats",
+                  "as_plotly", "as_matplotlib", "as_altair", "as_data_prep"}
+
+
 def run_code(code: str, datasets: Dict[str, Any]) -> RunOutcome:
     """Run agent-written code. Never raises: errors come back in RunOutcome."""
     code = strip_preloaded_imports(strip_code_fences(code))
@@ -201,12 +207,12 @@ def run_code(code: str, datasets: Dict[str, Any]) -> RunOutcome:
         "ChartResult": ChartResult,
         "as_plotly": as_plotly, "as_matplotlib": as_matplotlib,
         "as_altair": as_altair, "as_data_prep": as_data_prep,
-        "root_cause": root_cause,
+        "root_cause": root_cause, "run_stats": run_stats,
     }
     # Datasets are also available directly by name, as copies so failed code
     # can't half-modify the real data.
     for name, df in datasets.items():
-        if name.isidentifier():
+        if name.isidentifier() and name not in RESERVED_NAMES:
             env[name] = df.copy()
 
     buf = io.StringIO()
@@ -243,6 +249,34 @@ def strip_code_fences(s: str) -> str:
     return s.strip()
 
 
+def _norm_col(name: str) -> str:
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())  # "Vehicle Type" == "vehicle_type"
+
+
+def join_hints(dfs: Dict[str, Any]) -> List[str]:
+    """Columns with the same (normalised) name in two datasets, with how well their values match."""
+    hints = []
+    names = list(dfs)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            cols_b = {_norm_col(c): c for c in dfs[b].columns}
+            for ca in dfs[a].columns:
+                cb = cols_b.get(_norm_col(ca))
+                if cb is None:
+                    continue
+                va, vb = dfs[a][ca].dropna().astype(str), dfs[b][cb].dropna().astype(str)
+                if va.empty or vb.empty:
+                    continue
+                match_a = va.isin(set(vb.unique())).mean() * 100
+                match_b = vb.isin(set(va.unique())).mean() * 100
+                unique = [n for n, v in ((a, va), (b, vb)) if v.is_unique]
+                kind = (f"key is unique in {unique[0]} (many-to-one)" if len(unique) == 1 else
+                        "unique in both (one-to-one)" if unique else "not unique in either (many-to-many: careful)")
+                hints.append(f"  - {a}[{ca!r}] <-> {b}[{cb!r}]: {match_a:.0f}% of {a} rows and "
+                             f"{match_b:.0f}% of {b} rows have a match; {kind}")
+    return hints
+
+
 def describe_datasets(dfs: Dict[str, Any], column: Optional[str] = None, sample_rows: int = 5) -> str:
     """Text overview the agent reads before writing code."""
     parts: List[str] = []
@@ -268,4 +302,8 @@ def describe_datasets(dfs: Dict[str, Any], column: Optional[str] = None, sample_
         lines.append(f"First {sample_rows} rows:")
         lines.append(df.head(sample_rows).to_string(index=False, max_colwidth=40))
         parts.append("\n".join(lines))
+    if column is None and len(dfs) > 1:
+        hints = join_hints(dfs)
+        parts.append("Possible joins (same column name in two datasets):\n" + "\n".join(hints) if hints else
+                     "No columns with the same name in different datasets; check the values to find a join key.")
     return "\n\n".join(parts)

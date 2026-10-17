@@ -28,6 +28,7 @@ from langchain_openai import ChatOpenAI
 
 from AgentClass import RESERVED_NAMES, ChartResult, describe_datasets, run_code
 from rootcause import format_root_cause, root_cause
+from stats import run_stats
 
 # LLM providers (all OpenAI-compatible). "key" is the secrets.toml entry holding the API key;
 # "models" are tool-calling models, the first one is the default.
@@ -75,6 +76,11 @@ How to work:
    (e.g. "why did revenue drop in April?"). To chart its breakdown, in make_chart code use
    table, summary = root_cause(<dataset>, metric, split_column, group_a, group_b, agg)
    (table columns: column, segment, A, B, contribution, pct_of_change, expected, unexpected).
+   Use stats_check for correlations, outliers, trends ("is X growing?") and forecasts ("what will X be
+   next month?") instead of writing that statistics code yourself. To chart its result, in make_chart code use
+   table, text = run_stats(<dataset>, kind, columns, metric, date_column, agg, freq, periods)
+   (forecast table: period, forecast, low, high; trend table: period, value, trend_line).
+   Never invent forecasts or trends without these numbers.
 5. If a tool returns an error, read it, fix the code and try again. Do not repeat the same code.
    Ask instead of guessing: after inspecting the data, if you would have to CHOOSE between two or more
    columns or definitions that give different numbers, call ask_user with one short question and the
@@ -106,6 +112,7 @@ Don't change the dataset (no update_dataset); only read it. Don't ask the user q
 
 1. Call inspect_data to understand the columns.
 2. Use run_analysis for the key facts: size, missing values, main numeric columns, top categories.
+   Call stats_check with kind='correlations' and kind='outliers' (and kind='trend' if there is a date column).
 3. Make 3 charts with make_chart (one chart per call) that show the most important patterns.
 4. Pick the most important numeric metric and a natural comparison: the last two months/periods if
    there is a date column (split_column = the date column, groups = prefixes like '2024-11'),
@@ -125,7 +132,8 @@ Don't change the dataset (no update_dataset); only read it. Don't ask the user q
 
 PLANNER_PROMPT = """You plan the work of a data analysis agent before it starts.
 The agent's tools: inspect_data, run_analysis (pandas/SQL), make_chart, update_dataset,
-explain_change (root cause of a change between two groups/periods), ask_user.
+explain_change (root cause of a change between two groups/periods),
+stats_check (correlations, outliers, trend, forecast), ask_user.
 
 Write a short numbered plan of 2-5 steps for the user's request. One line per step, plain words,
 name the tool and the columns where you can. No code, no explanations, nothing else.
@@ -380,6 +388,32 @@ class DataAgent:
             return self._failed("explain_change", call, str(e))
         return self._log("explain_change", call, True, format_root_cause(table, summary))
 
+    def stats_check(self, kind: str, columns: str = "", metric: str = "", date_column: str = "",
+                    agg: str = "sum", freq: str = "M", periods: int = 3, dataset: str = "") -> str:
+        """Ready-made, reliable statistics. kind:
+        'correlations' - strongest correlations between numeric columns (optional `columns`, comma-separated)
+        'outliers'     - unusual values per numeric column, IQR rule (optional `columns`)
+        'trend'        - is `metric` (agg 'sum'/'mean'/'count') going up or down over `date_column`
+                         per freq ('D','W','M','Q','Y')? Includes significance.
+        'forecast'     - simple forecast of `metric` for the next `periods` periods, with a 95% range and a backtest.
+        `dataset` can be left empty when only one dataset is loaded."""
+        call = (f"stats_check(kind={kind!r}" + (f", columns={columns!r}" if columns else "")
+                + (f", metric={metric!r}, date_column={date_column!r}, agg={agg!r}, freq={freq!r}"
+                   if date_column else "") + (f", periods={periods}" if kind.startswith("forecast") else "") + ")")
+        if (stop := self._out_of_attempts("stats_check", call)):
+            return stop
+        if not dataset and len(self.datasets) == 1:
+            dataset = next(iter(self.datasets))
+        if dataset not in self.datasets:
+            return self._failed("stats_check", call, f"Unknown or missing dataset '{dataset}'. "
+                                                     f"Pass dataset= one of: {list(self.datasets)}")
+        cols = [c.strip() for c in columns.split(",") if c.strip()] or None
+        try:
+            _, text = run_stats(self.datasets[dataset], kind, cols, metric, date_column, agg, freq, periods)
+        except ValueError as e:
+            return self._failed("stats_check", call, str(e))
+        return self._log("stats_check", call, True, text)
+
     def ask_user(self, question: str, options: Optional[List[str]] = None) -> str:
         """Ask the user ONE short clarifying question instead of guessing, then stop and wait.
         Only use it when the request is ambiguous in a way that changes the answer and the data
@@ -395,7 +429,7 @@ class DataAgent:
     def _make_tools(self):
         tools = [StructuredTool.from_function(func=f) for f in
                  (self.inspect_data, self.run_analysis, self.make_chart, self.update_dataset,
-                  self.explain_change)]
+                  self.explain_change, self.stats_check)]
         # return_direct: the agent loop ends right after asking, so the user can answer.
         return tools + [StructuredTool.from_function(func=self.ask_user, return_direct=True)]
 

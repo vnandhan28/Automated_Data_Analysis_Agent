@@ -21,6 +21,7 @@
 | 🧹 | **Data cleaning** with one-click undo | *"Drop rows where Booking Value is missing"* |
 | 🔗 | **Multiple files & joins** — upload several tables; the agent finds join keys and merges them | *"Join the rides with the vehicle prices; which category has most completed rides?"* |
 | 🔍 | **Root-cause finder** — which segments drove a change | *"Why did revenue drop from March to April?"* |
+| 📐 | **Stats tools** — correlations, outliers, trend significance and forecasts with a 95% range and a backtest | *"Is booking value growing?"* · *"Forecast the next 2 weeks"* |
 | 📋 | **One-click auto report** — overview, 3 charts, key insights, drivers | **Analyze this dataset** button |
 | 🧐 | **Critic agent** — a second LLM reviews every answer and the agent fixes problems | Catches wrong numbers and unsupported claims |
 | ❓ | **Asks when unclear** — instead of guessing between columns or definitions, it asks you (with one-click options) and can remember your answer | *"Average rating?"* → *"Driver Ratings or Customer Rating?"* |
@@ -44,7 +45,7 @@ flowchart LR
     C -->|approved| U[Answer + charts]
 ```
 
-The LLM works in a loop with five tools. Every tool returns plain text, and if code fails the error goes back to the agent so it can **fix its own code and retry** (up to 4 times).
+The LLM works in a loop with its tools (plus `ask_user` for clarifying questions). Every tool returns plain text, and if code fails the error goes back to the agent so it can **fix its own code and retry** (up to 4 times).
 
 | Tool | What it does |
 |---|---|
@@ -53,6 +54,7 @@ The LLM works in a loop with five tools. Every tool returns plain text, and if c
 | `make_chart` | Builds a chart and checks it actually contains data |
 | `update_dataset` | Cleans or transforms a dataset, or saves a new one (e.g. a joined table); later steps see the new version |
 | `explain_change` | Breaks a metric's change between two periods/groups down by every column and ranks the segments that caused it |
+| `stats_check` | Correlations (with p-values), IQR outliers, trend with significance test, and a forecast (linear trend + seasonality, 95% range, backtest); incomplete first/last periods are left out automatically |
 
 **Root-cause finder.** For a sum, count or average compared between group A and group B, every other column is split into segments and each segment's contribution is computed (contributions add up exactly to the total change). Segments are ranked by their *unexpected* change — the part their size alone doesn't explain — so a segment isn't blamed just for being big. For averages the change is split into a rate effect (the segment's own average moved) and a mix effect (rows shifted towards it).
 
@@ -109,6 +111,7 @@ app.py              Streamlit interface: chat, live steps, sidebar, export
 langchain_agent.py  The agent: tools, fix-and-retry loop, critic, providers
 AgentClass.py       Safety checks and the sandboxed code runner
 rootcause.py        Root-cause breakdown (plain pandas)
+stats.py            Correlations, outliers, trend and forecast (pandas + numpy)
 memory.py           Saved rules and their retrieval
 report.py           HTML report export
 eval/               Test questions, runner and results

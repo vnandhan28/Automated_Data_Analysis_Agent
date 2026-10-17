@@ -240,6 +240,20 @@ def steps_label(steps) -> str:
     return f"🔧 Agent steps ({len(steps)}" + (f", {failed} fixed" if failed else "") + ")"
 
 
+def friendly_error(e: Exception) -> str:
+    """Plain-language message for the API errors visitors of the free demo will actually hit."""
+    s = str(e)
+    if "Request too large" in s or "Error code: 413" in s:
+        return ("⚠️ This request got too big for the free model's per-request limit. Try a narrower question, "
+                "turn off **Plan first** / **Critic check** in the sidebar, or switch to another model.")
+    if any(k in s for k in ("per day", "TPD", "RESOURCE_EXHAUSTED", "quota", "no remaining credits")):
+        return ("⚠️ The free daily limit for this model is used up. Pick another model or provider in the "
+                "sidebar (e.g. `openai/gpt-oss-20b` or Gemini), or try again later.")
+    if "429" in s or "Rate limit" in s or "503" in s or "overloaded" in s.lower():
+        return "⚠️ The model is busy right now (rate limit). Wait a minute and ask again."
+    return f"⚠️ Something went wrong: {s[:400]}"
+
+
 STEP_LABELS = {"memory": "🧠 memory", "ask_user": "❓ asked you", "plan": "📝 plan"}
 
 
@@ -394,8 +408,7 @@ if prompt:
                     msg["data_note"] = "✅ Data updated: " + "; ".join(notes)
         except Exception as e:
             status.update(label="⚠️ Stopped with an error", state="error", expanded=False)
-            msg = {"role": "assistant", "content": f"⚠️ Something went wrong: {e}",
-                   "steps": live_steps}
+            msg = {"role": "assistant", "content": friendly_error(e), "steps": live_steps}
 
     # Save first, then rerun so the chat, sidebar and preview all show the new state.
     st.session_state.chat_messages.append(msg)
