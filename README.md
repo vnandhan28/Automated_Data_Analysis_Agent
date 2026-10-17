@@ -14,7 +14,7 @@
 
 ## What it can do
 
-| | Feature | Example |
+| Feature | Example |
 |---|---|---|
  **Plain-English analysis** | *"Which vehicle type has the highest average booking value?"* |
  **Charts** (Plotly, Matplotlib, Altair), checked so they're never empty | *"Stacked area chart of Movies vs TV Shows per year"* |
