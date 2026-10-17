@@ -31,8 +31,6 @@
 | **Export**: the whole session as an interactive HTML report | **Download report** in the sidebar |
 | **Switch models**: Groq or Google Gemini from the sidebar | `gpt-oss-120b`, `gpt-oss-20b`, `gemini-3.5-flash` |
 
-## Workflow
-
 ## Work Flow
 
 ```mermaid
