@@ -16,20 +16,20 @@
 
 | | Feature | Example |
 |---|---|---|
-| 💬 | **Plain-English analysis** | *"Which vehicle type has the highest average booking value?"* |
-| 📈 | **Charts** (Plotly, Matplotlib, Altair), checked so they're never empty | *"Stacked area chart of Movies vs TV Shows per year"* |
-| 🧹 | **Data cleaning** with one-click undo | *"Drop rows where Booking Value is missing"* |
-| 🔗 | **Multiple files & joins** — upload several tables; the agent finds join keys and merges them | *"Join the rides with the vehicle prices; which category has most completed rides?"* |
-| 🔍 | **Root-cause finder** — which segments drove a change | *"Why did revenue drop from March to April?"* |
-| 📐 | **Stats tools** — correlations, outliers, trend significance and forecasts with a 95% range and a backtest | *"Is booking value growing?"* · *"Forecast the next 2 weeks"* |
-| 📋 | **One-click auto report** — overview, statistics, 2 charts, key insights, drivers (2–4 min on free tiers) | **Analyze this dataset** button |
-| 🧐 | **Critic agent** — a second LLM reviews every answer and the agent fixes problems | Catches wrong numbers and unsupported claims |
-| ❓ | **Asks when unclear** — instead of guessing between columns or definitions, it asks you (with one-click options) and can remember your answer | *"Average rating?"* → *"Driver Ratings or Customer Rating?"* |
-| 🧠 | **Learning memory** — rules you teach it are applied to related questions | `remember: revenue = Booking Value of completed rides only` |
-| 📝 | **Plan first** — bigger, multi-part requests get a short written plan before any tool runs; the critic checks every step was done | *"Compare Movies and TV Shows: counts, top rating of each, and a chart"* |
-| 🔧 | **Live steps** — watch each tool call and its code as it happens | Expand **Agent steps** |
-| 📄 | **Export** — the whole session as an interactive HTML report | **Download report** in the sidebar |
-| 🔌 | **Switch models** — Groq, Google Gemini or Hugging Face from the sidebar | `gpt-oss-120b`, `gemini-3.5-flash`, Llama… |
+ **Plain-English analysis** | *"Which vehicle type has the highest average booking value?"* |
+ **Charts** (Plotly, Matplotlib, Altair), checked so they're never empty | *"Stacked area chart of Movies vs TV Shows per year"* |
+ **Data cleaning** with one-click undo | *"Drop rows where Booking Value is missing"* |
+ **Multiple files & joins** — upload several tables; the agent finds join keys and merges them | *"Join the rides with the vehicle prices; which category has most completed rides?"* |
+ **Root-cause finder** — which segments drove a change | *"Why did revenue drop from March to April?"* |
+ **Stats tools** — correlations, outliers, trend significance and forecasts with a 95% range and a backtest | *"Is booking value growing?"* · *"Forecast the next 2 weeks"* |
+ **One-click auto report** — overview, statistics, 2 charts, key insights, drivers (2–4 min on free tiers) | **Analyze this dataset** button |
+ **Critic agent** — a second LLM reviews every answer and the agent fixes problems | Catches wrong numbers and unsupported claims |
+ **Asks when unclear** — instead of guessing between columns or definitions, it asks you (with one-click options) and can remember your answer | *"Average rating?"* → *"Driver Ratings or Customer Rating?"* |
+ **Learning memory** — rules you teach it are applied to related questions | `remember: revenue = Booking Value of completed rides only` |
+ **Plan first** — bigger, multi-part requests get a short written plan before any tool runs; the critic checks every step was done | *"Compare Movies and TV Shows: counts, top rating of each, and a chart"* |
+ **Live steps** — watch each tool call and its code as it happens | Expand **Agent steps** |
+ **Export** — the whole session as an interactive HTML report | **Download report** in the sidebar |
+ **Switch models** — Groq, Google Gemini or Hugging Face from the sidebar | `gpt-oss-120b`, `gemini-3.5-flash`, Llama… |
 
 ## Work Flow
 
