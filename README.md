@@ -22,7 +22,7 @@
 | 🔗 | **Multiple files & joins** — upload several tables; the agent finds join keys and merges them | *"Join the rides with the vehicle prices; which category has most completed rides?"* |
 | 🔍 | **Root-cause finder** — which segments drove a change | *"Why did revenue drop from March to April?"* |
 | 📐 | **Stats tools** — correlations, outliers, trend significance and forecasts with a 95% range and a backtest | *"Is booking value growing?"* · *"Forecast the next 2 weeks"* |
-| 📋 | **One-click auto report** — overview, 3 charts, key insights, drivers | **Analyze this dataset** button |
+| 📋 | **One-click auto report** — overview, statistics, 2 charts, key insights, drivers (2–4 min on free tiers) | **Analyze this dataset** button |
 | 🧐 | **Critic agent** — a second LLM reviews every answer and the agent fixes problems | Catches wrong numbers and unsupported claims |
 | ❓ | **Asks when unclear** — instead of guessing between columns or definitions, it asks you (with one-click options) and can remember your answer | *"Average rating?"* → *"Driver Ratings or Customer Rating?"* |
 | 🧠 | **Learning memory** — rules you teach it are applied to related questions | `remember: revenue = Booking Value of completed rides only` |
@@ -58,7 +58,7 @@ The LLM works in a loop with its tools (plus `ask_user` for clarifying questions
 
 **Root-cause finder.** For a sum, count or average compared between group A and group B, every other column is split into segments and each segment's contribution is computed (contributions add up exactly to the total change). Segments are ranked by their *unexpected* change — the part their size alone doesn't explain — so a segment isn't blamed just for being big. For averages the change is split into a rate effect (the segment's own average moved) and a mix effect (rows shifted towards it).
 
-**Critic.** After the agent answers, a second LLM call gets the question, every step's code and output, and the answer. It checks that the code answers the question, every number comes from a tool output, nothing is overclaimed, and saved rules were followed. If it finds a problem, the agent gets one chance to fix it. It can be switched off in the sidebar.
+**Critic.** After the agent answers, a second LLM call gets the question, every step's code and output, and the answer. It checks that the code answers the question, every number comes from a tool output, nothing is overclaimed, and saved rules were followed. If it finds a problem, the agent gets one chance to fix it. It can be switched off in the sidebar (the one-click auto report skips it to stay fast on free tiers).
 
 **Learning memory.** Rules are stored with a Gemini embedding; before each question the most similar ones (cosine ≥ 0.6, top 3) are given to the agent. Without a Gemini key a word-overlap match is used instead.
 

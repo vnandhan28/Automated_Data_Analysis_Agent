@@ -22,7 +22,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain.agents.middleware import wrap_model_call
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 
@@ -59,7 +60,11 @@ DEFAULT_PROVIDER = "groq"
 MAX_FAILED_RUNS = 4      # code errors allowed per question before the agent must stop
 MAX_AGENT_STEPS = 40     # hard cap on loop length (LangGraph recursion limit); auto-reports need ~25
 MAX_HISTORY_MESSAGES = 10
-CRITIC_OUTPUT_BUDGET = 16000  # characters of tool output the critic sees in total
+CRITIC_OUTPUT_BUDGET = 12000  # characters of tool output the critic sees in total
+# Free tiers reject big requests (Groq: 8k tokens per request and per minute). The system prompt and
+# tool schemas are ~7k chars; the conversation sent to the model is kept under this many chars.
+REQUEST_BUDGET_CHARS = 18000
+KEEP_FULL_TOOL_OUTPUTS = 2    # the most recent tool outputs are never shortened
 
 SYSTEM_PROMPT = """You are a data analysis agent. The user has loaded tabular data and asks questions about it.
 
@@ -113,7 +118,8 @@ Don't change the dataset (no update_dataset); only read it. Don't ask the user q
 1. Call inspect_data to understand the columns.
 2. Use run_analysis for the key facts: size, missing values, main numeric columns, top categories.
    Call stats_check with kind='correlations' and kind='outliers' (and kind='trend' if there is a date column).
-3. Make 3 charts with make_chart (one chart per call) that show the most important patterns.
+3. Make 2 charts with make_chart (one chart per call) that show the most important patterns.
+   Keep chart code simple (one plotly express call) so it works the first time.
 4. Pick the most important numeric metric and a natural comparison: the last two months/periods if
    there is a date column (split_column = the date column, groups = prefixes like '2024-11'),
    otherwise the two main groups of a key category. Don't compare groups that are defined by the
@@ -177,6 +183,49 @@ def _text(content: Any) -> str:
     if isinstance(content, list):
         return " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
     return content or ""
+
+
+def _size(msg) -> int:
+    return len(str(msg.content)) + len(str(getattr(msg, "tool_calls", "") or ""))
+
+
+def compact_messages(messages: List[Any], budget: int = REQUEST_BUDGET_CHARS) -> List[Any]:
+    """Shorten the OLDEST tool outputs until the conversation fits the budget. The agent already read
+    them (its later messages build on them); the newest outputs stay complete."""
+    total = sum(_size(m) for m in messages)
+    if total <= budget:
+        return messages
+    out = list(messages)
+    tool_idx = [i for i, m in enumerate(out) if isinstance(m, ToolMessage)][:-KEEP_FULL_TOOL_OUTPUTS or None]
+    for i in tool_idx:
+        text = str(out[i].content)
+        if len(text) > 400:
+            short = text[:400] + "\n... (older output shortened to save space; you already read it)"
+            total -= len(text) - len(short)
+            out[i] = out[i].model_copy(update={"content": short})
+        if total <= budget:
+            break
+    return out
+
+
+MALFORMED_TOOL_CALL = ("tool_use_failed", "Failed to parse tool call", "output_parse_failed")
+MALFORMED_RETRIES = 2
+
+
+@wrap_model_call
+def compact_context(request, handler):
+    """Runs around every model call:
+    - shortens old tool outputs in what is sent (the stored conversation stays complete);
+    - retries when the model writes a broken tool call (Groq's gpt-oss sometimes emits raw code
+      or loose text instead of JSON arguments; the API rejects it with tool_use_failed /
+      output_parse_failed)."""
+    request = request.override(messages=compact_messages(request.messages))
+    for attempt in range(MALFORMED_RETRIES + 1):
+        try:
+            return handler(request)
+        except Exception as e:
+            if attempt == MALFORMED_RETRIES or not any(k in str(e) for k in MALFORMED_TOOL_CALL):
+                raise
 
 
 @dataclass
@@ -263,7 +312,8 @@ class DataAgent:
                 timeout=60,
             )
         self.history: List[Any] = []   # HumanMessage / AIMessage pairs
-        self._agent = create_agent(model=self.llm, tools=self._make_tools(), system_prompt=SYSTEM_PROMPT)
+        self._agent = create_agent(model=self.llm, tools=self._make_tools(), system_prompt=SYSTEM_PROMPT,
+                                   middleware=[compact_context])
         self._reset_turn({})
 
     # ------------------------------------------------------------ per-turn state

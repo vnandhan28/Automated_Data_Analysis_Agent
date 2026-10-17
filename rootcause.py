@@ -85,6 +85,13 @@ def root_cause(df: pd.DataFrame, metric: str, split_column: str, group_a: Any, g
         raise ValueError(f"No rows for {'group_a' if not mask_a.any() else 'group_b'} in '{split_column}'. "
                          f"Example values: {examples}")
 
+    if agg != "count":
+        va, vb = df.loc[mask_a, metric].dropna(), df.loc[mask_b, metric].dropna()
+        if len(va) >= 10 and len(vb) >= 10 and (va.max() < vb.min() or vb.max() < va.min()):
+            raise ValueError(f"The {metric} values of the two groups don't overlap at all, so '{split_column}' "
+                             f"looks like it is defined by {metric} itself (e.g. score bands). Comparing them "
+                             f"explains nothing; pick groups that aren't derived from the metric.")
+
     values = df[metric] if agg != "count" else pd.Series(1, index=df.index)
     total_a, total_b = _total(values[mask_a], agg), _total(values[mask_b], agg)
     change = total_b - total_a

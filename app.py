@@ -298,10 +298,12 @@ else:
         tab.dataframe(d.head(), width="stretch")
 st.markdown("### 💬 Ask a question")
 if st.button(AUTO_REPORT_LABEL, type="primary",
-             help="The agent explores the data on its own: key facts, 3 charts, "
+             help="The agent explores the data on its own: key facts, statistics, 2 charts, "
                   "what drives the main change, and a short report."):
     st.session_state.pending_prompt = AUTO_REPORT_LABEL
     st.rerun()
+st.caption("⏱️ The report runs about 10 steps and takes roughly 2–4 minutes on the free model tier. "
+           "You can watch each step live while it works.")
 
 for i, msg in enumerate(st.session_state.chat_messages):
     with st.chat_message(msg["role"]):
@@ -382,8 +384,11 @@ if prompt:
                             f"Now answer my original request: {original}")
             st.session_state.pending_clarification = None
             rules = [r["text"] for r, _ in rule_memory.relevant(question)]
-            reply = agent.ask(question, dict(datasets), on_step=on_step, critic=use_critic, rules=rules,
-                              plan=use_plan)
+            # The auto report's instructions already are a plan, so it skips the planning call; it also
+            # skips the critic, whose review + fix round would double its run time on the free tier.
+            is_report = prompt == AUTO_REPORT_LABEL
+            reply = agent.ask(question, dict(datasets), on_step=on_step, critic=use_critic and not is_report,
+                              rules=rules, plan=use_plan and not is_report)
             status.update(label=steps_label(reply.steps) if reply.steps else "✅ Done",
                           state="complete", expanded=False)
             msg = {"role": "assistant", "content": reply.answer,
