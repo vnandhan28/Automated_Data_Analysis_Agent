@@ -114,6 +114,8 @@ rootcause.py        Root-cause breakdown (plain pandas)
 stats.py            Correlations, outliers, trend and forecast (pandas + numpy)
 memory.py           Saved rules and their retrieval
 report.py           HTML report export
+theme.py            Design tokens, shared chart theme, amber highlighter, small CSS
+                    (colours/fonts live in .streamlit/config.toml)
 eval/               Test questions, runner and results
 ```
 

@@ -27,6 +27,11 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.express as px  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
+import plotly.io as pio  # noqa: E402
+
+import theme  # noqa: E402
+
+theme.apply_chart_theme()  # every chart the agent builds uses the app's chart theme
 
 from rootcause import root_cause  # noqa: E402
 from stats import run_stats  # noqa: E402
@@ -199,6 +204,9 @@ def run_code(code: str, datasets: Dict[str, Any]) -> RunOutcome:
     except UnsafeCodeError as e:
         return RunOutcome(ok=False, error=f"Code rejected: {e}")
 
+    # Streamlit resets the Plotly/Altair defaults when it first draws a chart, so set ours every run.
+    pio.templates.default = theme.PLOTLY_TEMPLATE
+    alt.theme.enable("analyst")
     sql = SQLProxy(datasets)
     env: Dict[str, Any] = {
         "__builtins__": SAFE_BUILTINS,

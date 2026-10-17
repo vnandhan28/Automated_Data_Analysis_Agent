@@ -14,26 +14,26 @@ from langchain_agent import AUTO_REPORT_LABEL, AUTO_REPORT_PROMPT, DEFAULT_PROVI
 from memory import DEFAULT_PATH as MEMORY_PATH
 from memory import RuleMemory, gemini_embedder, parse_remember
 from report import build_report
+from theme import APP_CSS, NOTE_STEPS, STEPS, highlight_markdown, step_meta
 
-st.set_page_config(page_title="AI Data Analysis Agent", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Ask your data", layout="wide", page_icon="📊")
+st.html(APP_CSS)
 
-st.title("📊 AI Data Analysis Agent")
-st.markdown(
-    """
-Upload one or more **CSV or Excel** files (or pick a sample) and ask questions in plain English.
-The agent looks at your data, runs calculations, draws charts, joins tables, and fixes its own mistakes.
-
-- "Which cancer type has the highest average risk score? Show it as a bar chart."
-- "Create a stacked area chart of Movies and TV Shows released each year."
-- "Join the rides with the vehicle prices and compare the estimated fare with Booking Value."
-"""
-)
-
-SAMPLES = {
-    "Cancer risk factors": ["cancer-risk-factors.csv"],
-    "Netflix titles": ["netflix_titles.csv"],
-    "Uber bookings": ["ncr_ride_bookings.csv"],
-    "Uber bookings + vehicle prices (2 files)": ["ncr_ride_bookings.csv", "vehicle_types.csv"],
+# Sample datasets shown as cards. "uber_prices" has no card of its own: the Uber card offers it.
+SAMPLE_SETS = {
+    "cancer": dict(name="Cancer risk factors", files=["cancer-risk-factors.csv"], image="icons/cancer.png",
+                   desc="Patients with lifestyle and genetic risk factors and an overall risk score."),
+    "netflix": dict(name="Netflix titles", files=["netflix_titles.csv"], image="icons/netflix.png",
+                    desc="Movies and TV shows with ratings, countries and release years."),
+    "uber": dict(name="Uber ride bookings", files=["ncr_ride_bookings.csv"], image="icons/uber.png",
+                 desc="A year of rides in Delhi NCR: status, vehicle type, value and ratings."),
+    "uber_prices": dict(name="Uber bookings + vehicle prices", files=["ncr_ride_bookings.csv", "vehicle_types.csv"]),
+}
+AVATARS = {"user": ":material/person:", "assistant": ":material/insights:"}
+EXAMPLES = {  # example question -> sample it needs
+    "Which cancer type has the highest average risk score?": "cancer",
+    "How many movies and TV shows came out each year?": "netflix",
+    "Why did booking value change from March to April 2024?": "uber",
 }
 
 
@@ -51,6 +51,11 @@ def dataset_name(filename: str, taken) -> str:
     while name in taken:
         name, i = f"{base}_{i}", i + 1
     return name
+
+
+def md_escape(text: str) -> str:
+    """Show tool output as plain text inside markdown."""
+    return re.sub(r"([\\`*_\[\]<>#|~$])", r"\\\1", text)
 
 
 # Named datasets. "datasets" are the working copies the agent may change; "originals" are
@@ -72,33 +77,64 @@ def remove_datasets(predicate):
             st.session_state[key].pop(name, None)
 
 
-# ---------------------------------------------------------------- state
+def use_sample(sample_key: str):
+    """Replace the current sample data (uploads stay) with one of SAMPLE_SETS."""
+    remove_datasets(lambda src: src == "sample")
+    for path in SAMPLE_SETS[sample_key]["files"]:
+        add_dataset(dataset_name(path, st.session_state.datasets), load_sample(path), "sample")
+    st.session_state.last_sample = sample_key
 
-# Provider + model: PROVIDER / MODEL in secrets.toml set the defaults; the sidebar can change them.
-# Only providers whose API key is filled in are offered.
+
+def ask(question: str):
+    st.session_state.pending_prompt = question
+
+
+def run_example():
+    question = st.session_state.get("example_chip")
+    if question:
+        use_sample(EXAMPLES[question])
+        ask(question)
+    st.session_state.example_chip = None
+
+
+def run_suggestion():
+    if question := st.session_state.get("suggestion_chip"):
+        ask(question)
+    st.session_state.suggestion_chip = None
+
+
+# ---------------------------------------------------------------- sidebar: model and checks
+
 providers = [p for p, cfg in PROVIDERS.items() if st.secrets.get(cfg["key"], "").strip()]
 if not providers:
-    st.error("No API key found. Add GROQ_key, HF_key or GEMINI_key to .streamlit/secrets.toml.")
+    st.title("Ask your data a question")
+    st.error("Add an API key to start: put GROQ_key or GEMINI_key in .streamlit/secrets.toml, then reload.")
     st.stop()
-default_provider = st.secrets.get("PROVIDER", DEFAULT_PROVIDER)
-provider = st.sidebar.selectbox("🔌 Provider", providers,
-                                index=providers.index(default_provider) if default_provider in providers else 0)
 
-model_options = list(PROVIDERS[provider]["models"])
-secret_model = st.secrets.get("MODEL", "")
-if provider == default_provider and secret_model:
-    if secret_model not in model_options:
-        model_options.insert(0, secret_model)
-    model_index = model_options.index(secret_model)
-else:
-    model_index = 0
-model = st.sidebar.selectbox("🤖 Model", model_options, index=model_index)
-use_critic = st.sidebar.toggle("🧐 Critic check", value=True,
-                               help="A second LLM call reviews each answer (code, numbers, claims) "
-                                    "and the agent fixes problems once. Slower, but more reliable.")
-use_plan = st.sidebar.toggle("📝 Plan first", value=True,
-                             help="For bigger, multi-part requests the agent first writes a short plan, "
-                                  "then follows it. Simple questions skip this.")
+with st.sidebar:
+    st.subheader("🧠 Model")
+    st.caption("The AI model that answers your questions.")
+    default_provider = st.secrets.get("PROVIDER", DEFAULT_PROVIDER)
+    provider = st.selectbox("Provider", providers,
+                            index=providers.index(default_provider) if default_provider in providers else 0)
+    model_options = list(PROVIDERS[provider]["models"])
+    secret_model = st.secrets.get("MODEL", "")
+    if provider == default_provider and secret_model:
+        if secret_model not in model_options:
+            model_options.insert(0, secret_model)
+        model_index = model_options.index(secret_model)
+    else:
+        model_index = 0
+    model = st.selectbox("Model", model_options, index=model_index)
+
+    st.subheader("🛡️ Checks")
+    st.caption("Extra steps that make answers more reliable but slower.")
+    use_critic = st.toggle("Critic check", value=True,
+                           help="A second AI call reviews each answer (code, numbers, claims); "
+                                "the agent fixes problems once.")
+    use_plan = st.toggle("Plan first", value=True,
+                         help="For bigger, multi-part requests the agent writes a short plan first. "
+                              "Simple questions skip this.")
 
 current = st.session_state.get("agent")
 if current is None or (current.provider, current.model) != (provider, model):
@@ -106,8 +142,7 @@ if current is None or (current.provider, current.model) != (provider, model):
     st.session_state.agent = DataAgent(st.secrets[PROVIDERS[provider]["key"]], model=model, provider=provider)
     if old is not None:
         st.session_state.agent.history = old.history  # keep chat memory when switching
-if "chat_messages" not in st.session_state:
-    st.session_state.chat_messages = []
+st.session_state.setdefault("chat_messages", [])
 
 # Learning memory. Rules are saved to disk only with SAVE_MEMORY = true (local use); on the
 # public app each visitor keeps their own rules for the session, so nobody can change others' answers.
@@ -120,22 +155,53 @@ if "rule_memory" not in st.session_state:
 agent: DataAgent = st.session_state.agent
 rule_memory: RuleMemory = st.session_state.rule_memory
 
-# ---------------------------------------------------------------- data loading
-# Data is only (re)loaded when the sample choice or the set of uploaded files changes,
-# so cleaned data isn't overwritten on every rerun.
+# ---------------------------------------------------------------- hero
 
-sample_choice = st.selectbox("Try a sample dataset:", ["None"] + list(SAMPLES))
-if sample_choice != st.session_state.get("last_sample", "None"):
-    st.session_state.last_sample = sample_choice
-    remove_datasets(lambda src: src == "sample")
-    for path in SAMPLES.get(sample_choice, []):
-        add_dataset(dataset_name(path, st.session_state.datasets), load_sample(path), "sample")
+st.title("Ask your data a question")
+st.markdown(":gray[Upload a spreadsheet and get the answer, the chart, the code behind it, and a second check.]")
+st.caption(f"Model: {model} · Critic check {'on' if use_critic else 'off'}")
 
-st.markdown("### 📎 Upload your datasets")
-uploads = st.file_uploader("Choose one or more CSV or Excel files", type=["csv", "xlsx"],
-                           accept_multiple_files=True)
+# ---------------------------------------------------------------- start: samples, upload, examples
+# Shown open until data is loaded, then folded into an expander. The uploader keeps its files when
+# it moves, because Streamlit identifies widgets by their arguments, not their position.
+
+datasets = st.session_state.datasets
+start = st.expander("Change or add data", expanded=False) if datasets else st.container()
+with start:
+    if not datasets:
+        st.write("")
+        st.subheader("Start with a sample or your own file")
+    cards_col, upload_col = st.columns([3, 2], gap="large")
+    with cards_col:
+        for key in ("cancer", "netflix", "uber"):
+            info = SAMPLE_SETS[key]
+            shape = load_sample(info["files"][0]).shape
+            with st.container(border=True, key=f"card-{key}"):
+                img_col, text_col = st.columns([1, 5], vertical_alignment="center")
+                img_col.image(info["image"], width=56)
+                with text_col:
+                    st.markdown(f"**{info['name']}**  \n:gray[{shape[0]:,} rows · {shape[1]} columns]")
+                    st.caption(info["desc"])
+                    in_use = st.session_state.get("last_sample") == key
+                    with st.container(horizontal=True):
+                        st.button("In use" if in_use else "Use this dataset", key=f"use-{key}",
+                                  disabled=in_use, on_click=use_sample, args=(key,))
+                        if key == "uber":
+                            prices_in_use = st.session_state.get("last_sample") == "uber_prices"
+                            st.button("In use with vehicle prices" if prices_in_use
+                                      else "Use with vehicle prices (2 files)", key="use-uber_prices",
+                                      type="tertiary", disabled=prices_in_use,
+                                      on_click=use_sample, args=("uber_prices",),
+                                      help="Adds a small made-up price table per vehicle type, to try joins.")
+    with upload_col:
+        uploads = st.file_uploader("Drop CSV or Excel files here", type=["csv", "xlsx"],
+                                   accept_multiple_files=True,
+                                   help="You can add several files; the agent can join them.")
+    st.pills("Or try an example question", list(EXAMPLES), key="example_chip", on_change=run_example)
+
+# Sync uploaded files with the datasets (add new files, drop removed ones).
 upload_ids = {f"upload:{f.name}:{f.size}": f for f in uploads or []}
-remove_datasets(lambda src: src.startswith("upload:") and src not in upload_ids)  # file removed
+remove_datasets(lambda src: src.startswith("upload:") and src not in upload_ids)
 for upload_id, f in upload_ids.items():
     if upload_id in st.session_state.sources.values():
         continue
@@ -145,276 +211,325 @@ for upload_id, f in upload_ids.items():
                   else pd.read_excel(file_io, engine="openpyxl"))
         add_dataset(dataset_name(f.name, st.session_state.datasets), new_df, upload_id)
     except Exception as e:
-        st.error(f"Failed to load {f.name}: {e}")
+        st.error(f"Couldn't read {f.name}: {e}. Check that it's a valid CSV or Excel file.")
 
 datasets = st.session_state.datasets
 data_changed = any(name not in st.session_state.originals or df is not st.session_state.originals[name]
                    for name, df in datasets.items()) or "agent" in st.session_state.sources.values()
 
-# ---------------------------------------------------------------- sidebar
+# ---------------------------------------------------------------- sidebar: rules and session
 
 with st.sidebar:
-    st.header("⚙️ Controls")
+    st.subheader("📌 Saved rules")
+    st.caption("Definitions the agent follows when they apply. You can also type `remember: ...` in the chat.")
+    with st.form("add_rule", clear_on_submit=True, border=False):
+        new_rule = st.text_input("New rule", placeholder="e.g. Revenue = sum of Booking Value",
+                                 label_visibility="collapsed")
+        if st.form_submit_button("Save rule", width="stretch") and new_rule.strip():
+            rule_memory.add(new_rule)
+            st.rerun()
+    for rule in rule_memory.rules:
+        text_col, del_col = st.columns([5, 1], vertical_alignment="center")
+        text_col.markdown(md_escape(rule["text"]))
+        if del_col.button("", icon=":material/delete:", key=f"del_{rule['id']}", type="tertiary",
+                          help="Delete this rule"):
+            rule_memory.delete(rule["id"])
+            st.rerun()
+    if not rule_memory.rules:
+        st.caption("No rules yet.")
+    elif not rule_memory.path:
+        st.caption("Rules last for this session only.")
 
-    if st.button("🧹 Clear conversation", width="stretch"):
-        st.session_state.chat_messages = []
-        st.session_state.pending_clarification = None
-        agent.clear()
-        st.rerun()
-
+    st.subheader("🗂️ Session")
+    st.caption("Export what you found, or start over.")
     if st.session_state.chat_messages:
         report_html = build_report(st.session_state.chat_messages, {
             "Datasets": ", ".join(f"{n} ({d.shape[0]:,}×{d.shape[1]})" for n, d in datasets.items()),
             "Model": f"{agent.provider} / {agent.model}",
         })
-        st.download_button("📄 Download report (HTML)", report_html,
+        st.download_button("Export report as HTML", report_html,
                            f"analysis_report_{time.strftime('%Y%m%d_%H%M')}.html", "text/html",
                            width="stretch", help="All questions, answers, charts and agent steps in one file.")
-
-    if data_changed and st.button("↩️ Undo all data changes", width="stretch",
+    if data_changed and st.button("Undo data changes", width="stretch",
                                   help="Restore the loaded data and remove tables the agent created."):
         remove_datasets(lambda src: src == "agent")
         st.session_state.datasets.update(st.session_state.originals)
         st.rerun()
+    if st.button("Clear conversation", width="stretch"):
+        st.session_state.chat_messages = []
+        st.session_state.pending_clarification = None
+        agent.clear()
+        st.rerun()
+    with st.expander("What the agent remembers"):
+        if not agent.history:
+            st.caption("Nothing yet.")
+        for msg in agent.history[-4:]:
+            role = "You" if msg.type == "human" else "Agent"
+            st.caption(f"**{role}:** {md_escape(str(msg.content)[:300])}")
 
-    st.markdown("---")
-    if datasets:
-        st.subheader(f"📊 Datasets ({len(datasets)})")
-        for name, d in datasets.items():
-            src = st.session_state.sources.get(name, "")
-            origin = ("sample" if src == "sample" else "created by the agent" if src == "agent"
-                      else f"file: {src.split(':')[1]}")
-            edited = " · edited" if d is not st.session_state.originals.get(name) else ""
-            with st.expander(f"`{name}` · {d.shape[0]:,} × {d.shape[1]}"):
-                st.caption(origin + edited)
-                for col in d.columns:
-                    st.write(f"- **{col}** ({d[col].dtype}) | {int(d[col].isna().sum())} nulls")
-
-    st.markdown("---")
-    st.subheader("🧠 Saved rules")
-    st.caption("Rules and definitions the agent follows when relevant. "
-               "You can also type `remember: ...` in the chat.")
-    with st.form("add_rule", clear_on_submit=True, border=False):
-        new_rule = st.text_input("New rule", placeholder="e.g. Revenue = sum of Booking Value",
-                                 label_visibility="collapsed")
-        if st.form_submit_button("💾 Save rule", width="stretch") and new_rule.strip():
-            rule_memory.add(new_rule)
-            st.rerun()
-    for rule in rule_memory.rules:
-        text_col, del_col = st.columns([5, 1])
-        text_col.write(f"• {rule['text']}")
-        if del_col.button("🗑", key=f"del_{rule['id']}", help="Delete this rule"):
-            rule_memory.delete(rule["id"])
-            st.rerun()
-    if not rule_memory.path:
-        st.caption("Rules last for this session only.")
-
-    st.markdown("---")
-    st.subheader("💬 Recent chat")
-    if not agent.history:
-        st.caption("Nothing yet.")
-    for msg in agent.history[-4:]:
-        role = "User" if msg.type == "human" else "Agent"
-        st.write(f"**{role}:** {msg.content[:300]}")
-
-# ---------------------------------------------------------------- chat helpers
+# ---------------------------------------------------------------- helpers
 
 
-def show_chart(chart, key: str):
+def show_chart(chart, key: str, downloads: bool = True):
+    # theme=None keeps the shared chart theme (theme.py) instead of Streamlit's own. Streamlit still fills
+    # in background colours the figure leaves unset, so the transparent ones are set explicitly.
     if chart.kind == "plotly":
-        st.plotly_chart(chart.obj, key=f"plot_{key}")
-        st.download_button("🌐 Download HTML", chart.obj.to_html(), f"chart_{key}.html",
-                           "text/html", key=f"dl_{key}")
+        chart.obj.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(chart.obj, key=f"plot_{key}", theme=None)
+        if downloads:
+            st.download_button("Download chart (HTML)", chart.obj.to_html(), f"chart_{key}.html",
+                               "text/html", key=f"dl_{key}", type="tertiary")
     elif chart.kind == "matplotlib":
         st.pyplot(chart.obj)
-        buf = io.BytesIO()
-        chart.obj.savefig(buf, format="png", bbox_inches="tight")
-        st.download_button("💾 Download PNG", buf.getvalue(), f"chart_{key}.png",
-                           "image/png", key=f"dl_{key}")
+        if downloads:
+            buf = io.BytesIO()
+            chart.obj.savefig(buf, format="png", bbox_inches="tight")
+            st.download_button("Download chart (PNG)", buf.getvalue(), f"chart_{key}.png",
+                               "image/png", key=f"dl_{key}", type="tertiary")
     elif chart.kind == "altair":
-        st.altair_chart(chart.obj, key=f"plot_{key}")
-
-
-def steps_label(steps) -> str:
-    failed = sum(1 for s in steps if not s.ok)
-    return f"🔧 Agent steps ({len(steps)}" + (f", {failed} fixed" if failed else "") + ")"
+        st.altair_chart(chart.obj, key=f"plot_{key}", theme=None)
 
 
 def friendly_error(e: Exception) -> str:
     """Plain-language message for the API errors visitors of the free demo will actually hit."""
     s = str(e)
     if "Request too large" in s or "Error code: 413" in s:
-        return ("⚠️ This request got too big for the free model's per-request limit. Try a narrower question, "
-                "turn off **Plan first** / **Critic check** in the sidebar, or switch to another model.")
+        return ("This request is too big for the free model's per-request limit. Ask a narrower question, "
+                "turn off **Plan first** or **Critic check** in the sidebar, or switch model.")
     if any(k in s for k in ("per day", "TPD", "RESOURCE_EXHAUSTED", "quota", "no remaining credits")):
-        return ("⚠️ The free daily limit for this model is used up. Pick another model or provider in the "
+        return ("The free daily limit for this model is used up. Pick another model or provider in the "
                 "sidebar (e.g. `openai/gpt-oss-20b` or Gemini), or try again later.")
     if "429" in s or "Rate limit" in s or "503" in s or "overloaded" in s.lower():
-        return "⚠️ The model is busy right now (rate limit). Wait a minute and ask again."
-    return f"⚠️ Something went wrong: {s[:400]}"
+        return "The model is busy right now. Wait a minute, then ask again."
+    return f"The request failed: {s[:400]}. Rephrase the question or switch model in the sidebar."
 
 
-STEP_LABELS = {"memory": "🧠 memory", "ask_user": "❓ asked you", "plan": "📝 plan"}
-
-
-def show_step(i: int, s):
-    icon = "✅" if s.ok else "⚠️"
-    if s.tool == "critic":
-        st.markdown(f"**{i}. 🧐 critic: {'approved' if s.ok else 'found problems'}**")
-        (st.success if s.ok else st.warning)(s.output)
+def show_step(s):
+    icon, label = step_meta(s)
+    first = s.output.strip().splitlines()[0] if s.output.strip() else ""
+    summary = "" if s.tool in NOTE_STEPS or first.startswith("ERROR") else first[:110]
+    st.markdown(f"{icon} **{label}**" + (f" · :gray[{md_escape(summary)}]" if summary else ""))
+    if s.tool in NOTE_STEPS:
+        st.caption(md_escape(s.output.strip()))
         return
-    if s.tool in ("memory", "ask_user", "plan"):
-        st.markdown(f"**{i}. {STEP_LABELS[s.tool]}**")
-        st.info(s.output)
-        return
-    st.markdown(f"**{i}. {icon} {s.tool}**")
-    if s.tool == "inspect_data":
-        if s.code:
-            st.caption(f"column: {s.code}")
-    else:
-        st.code(s.code, language="python")
-    st.text(s.output[:1500])
+    if s.code and s.tool != "inspect_data":
+        st.code(s.code, language="python", wrap_lines=True)
+    output = s.output.strip()[:1500]
+    st.code(output, language=None, wrap_lines=True, height=220 if output.count("\n") > 10 else "content")
 
 
-def show_steps(steps):
+def show_steps(steps, key: str):
     if not steps:
         return
-    with st.expander(steps_label(steps)):
-        for i, s in enumerate(steps, 1):
-            show_step(i, s)
+    tools = [s for s in steps if s.tool not in NOTE_STEPS]
+    with st.expander(f"How it got this · {len(tools)} step{'s' if len(tools) != 1 else ''}"):
+        with st.container(key=f"timeline-{key}"):
+            for s in steps:
+                show_step(s)
 
 
-# ---------------------------------------------------------------- main chat
+def check_badge(steps):
+    critic = [s for s in steps or [] if s.tool == "critic"]
+    if critic:
+        if critic[0].ok:
+            st.badge("Checked", icon="✅", color="green")
+        else:
+            st.badge("Revised after check", icon="⚠️", color="orange")
+
+
+def render_assistant(msg, key: str):
+    if msg.get("error"):
+        st.error(msg["content"], icon="⚠️")
+    else:
+        st.markdown(highlight_markdown(msg["content"]))
+    if msg.get("clarification"):
+        st.badge("Needs your answer", icon="❓", color="blue")
+    check_badge(msg.get("steps"))
+    if msg.get("data_note"):
+        st.success(msg["data_note"], icon="✅")
+    for j, chart in enumerate(msg.get("charts", [])):
+        show_chart(chart, f"{key}_{j}")
+    show_steps(msg.get("steps"), key)
+
+
+# ---------------------------------------------------------------- empty state
 
 if not datasets:
-    st.info("Upload one or more `.csv` / `.xlsx` files, or pick a sample dataset.")
     st.stop()
 
-if len(datasets) == 1:
-    st.dataframe(next(iter(datasets.values())).head(), width="stretch")
-else:
-    for tab, (name, d) in zip(st.tabs([f"{n} ({d.shape[0]:,}×{d.shape[1]})" for n, d in datasets.items()]),
-                              datasets.items()):
-        tab.dataframe(d.head(), width="stretch")
-st.markdown("### 💬 Ask a question")
-if st.button(AUTO_REPORT_LABEL, type="primary",
-             help="The agent explores the data on its own: key facts, statistics, 2 charts, "
-                  "what drives the main change, and a short report."):
-    st.session_state.pending_prompt = AUTO_REPORT_LABEL
-    st.rerun()
-st.caption("⏱️ The report runs about 10 steps and takes roughly 2–4 minutes on the free model tier. "
-           "You can watch each step live while it works.")
+# ---------------------------------------------------------------- KPI strip
 
-for i, msg in enumerate(st.session_state.chat_messages):
-    with st.chat_message(msg["role"]):
-        if msg["role"] == "assistant":
-            show_steps(msg.get("steps"))
-        st.markdown(msg["content"])
-        if msg.get("data_note"):
-            st.success(msg["data_note"])
-        for j, chart in enumerate(msg.get("charts", [])):
-            show_chart(chart, f"{i}_{j}")
+primary_name, primary = next(iter(datasets.items()))
+stats_cache = st.session_state.setdefault("kpi_cache", {})
+if id(primary) not in stats_cache:  # duplicates on 150k rows takes a moment; compute once per table
+    cells = primary.shape[0] * primary.shape[1]
+    stats_cache.clear()
+    stats_cache[id(primary)] = (primary.isna().sum().sum() / cells * 100 if cells else 0,
+                                int(primary.duplicated().sum()))
+missing_pct, duplicates = stats_cache[id(primary)]
+with st.container(horizontal=True, gap="medium"):
+    st.metric("Rows", f"{primary.shape[0]:,}", border=True)
+    st.metric("Columns", f"{primary.shape[1]}", border=True)
+    st.metric("Missing values", f"{missing_pct:.1f}%", border=True)
+    st.metric("Duplicate rows", f"{duplicates:,}", border=True)
+if len(datasets) > 1:
+    st.caption(f"Figures for `{primary_name}` · {len(datasets)} tables loaded, see the Data tab.")
 
-# The agent asked a clarifying question: offer its suggested answers as buttons.
-pending = st.session_state.get("pending_clarification")
-if pending and st.session_state.chat_messages and st.session_state.chat_messages[-1].get("clarification"):
-    if pending["options"]:
-        for col, option in zip(st.columns(len(pending["options"])), pending["options"]):
-            if col.button(option, key=f"opt_{option}", width="stretch"):
-                st.session_state.pending_prompt = option
-                st.rerun()
-    st.checkbox("💾 Remember my answer as a rule", key="remember_answer",
-                help="Saves the question and your answer, so the agent won't need to ask again.")
+chat_tab, data_tab, dash_tab = st.tabs(["Chat", "Data", "Dashboard"])
 
-if not st.session_state.chat_messages:
-    st.markdown("##### 💡 Suggested questions")
-    suggestions = [
-        "How can these datasets be joined? Join them and summarize the result." if len(datasets) > 1
-        else "Give me a quick overview of this dataset",
-        "What are the most interesting patterns? Show one chart.",
-        "Are there missing values? Clean them up.",
-    ]
-    for col, s in zip(st.columns(len(suggestions)), suggestions):
-        if col.button(s, width="stretch"):
-            st.session_state.pending_prompt = s
+# ---------------------------------------------------------------- data tab
+
+with data_tab:
+    def show_table(name, d):
+        src = st.session_state.sources.get(name, "")
+        origin = ("Sample dataset" if src == "sample" else "Created by the agent" if src == "agent"
+                  else f"Uploaded file: {src.split(':')[1]}")
+        edited = " · edited in this session" if d is not st.session_state.originals.get(name) else ""
+        st.caption(f"`{name}` · {d.shape[0]:,} rows × {d.shape[1]} columns · {origin}{edited}")
+        st.dataframe(d.head(100), width="stretch", height=320)
+        columns = pd.DataFrame({"Column": d.columns.astype(str), "Type": d.dtypes.astype(str).values,
+                                "Missing": d.isna().sum().values, "Unique values": d.nunique().values})
+        st.markdown("**Columns**")
+        st.dataframe(columns, width="stretch", hide_index=True)
+
+    if len(datasets) == 1:
+        show_table(*next(iter(datasets.items())))
+    else:
+        for tab, (name, d) in zip(st.tabs(list(datasets)), datasets.items()):
+            with tab:
+                show_table(name, d)
+
+# ---------------------------------------------------------------- dashboard tab
+
+with dash_tab:
+    charts = [(i, j, c) for i, m in enumerate(st.session_state.chat_messages)
+              for j, c in enumerate(m.get("charts", []))]
+    if not charts:
+        st.caption("Charts from the chat collect here. Ask for one in the Chat tab, "
+                   "e.g. \"Show average risk score by cancer type as a bar chart\".")
+    for row in range(0, len(charts), 2):
+        for col, (i, j, chart) in zip(st.columns(2, gap="medium"), charts[row:row + 2]):
+            with col, st.container(border=True):
+                show_chart(chart, f"dash_{i}_{j}", downloads=False)
+                if chart.explanation:
+                    st.caption(chart.explanation)
+
+# ---------------------------------------------------------------- chat tab
+
+with chat_tab:
+    with st.container(horizontal=True, vertical_alignment="center"):
+        if st.button(AUTO_REPORT_LABEL, type="primary",
+                     help="The agent explores the data on its own: key facts, statistics, 2 charts, "
+                          "what drives the main change, and a short report."):
+            ask(AUTO_REPORT_LABEL)
             st.rerun()
+        st.caption("Writes a short report in about 10 steps. Takes 2–4 minutes on the free model tier; "
+                   "you can watch each step live.")
 
-prompt = st.chat_input("Type your answer, or pick an option above..." if pending
-                       else "Ask something about the data...")
-if "pending_prompt" in st.session_state:
-    prompt = st.session_state.pop("pending_prompt")
+    for i, msg in enumerate(st.session_state.chat_messages):
+        with st.chat_message(msg["role"], avatar=AVATARS[msg["role"]]):
+            if msg["role"] == "assistant":
+                render_assistant(msg, str(i))
+            else:
+                st.markdown(md_escape(msg["content"]))
 
-if prompt and (rule_text := parse_remember(prompt)):
-    # "remember: ..." saves a rule; no agent call needed.
-    rule_memory.add(rule_text)
-    st.session_state.chat_messages += [
-        {"role": "user", "content": prompt},
-        {"role": "assistant", "content": f"💾 Saved rule: *{rule_text}*. I'll follow it in related questions."},
-    ]
-    st.rerun()
+    # The agent asked a clarifying question: offer its suggested answers as buttons.
+    pending = st.session_state.get("pending_clarification")
+    if pending and st.session_state.chat_messages and st.session_state.chat_messages[-1].get("clarification"):
+        if pending["options"]:
+            with st.container(horizontal=True):
+                for option in pending["options"]:
+                    if st.button(option, key=f"opt_{option}"):
+                        ask(option)
+                        st.rerun()
+        st.checkbox("Remember my answer as a rule", key="remember_answer",
+                    help="Saves the question and your answer, so the agent won't need to ask again.")
 
-if prompt:
-    st.session_state.chat_messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    if not st.session_state.chat_messages:
+        suggestions = [
+            "How can these tables be joined? Join them and summarize the result." if len(datasets) > 1
+            else "Give me a quick overview of this dataset",
+            "What are the most interesting patterns? Show one chart.",
+            "Are there missing values? Clean them up.",
+        ]
+        st.pills("Suggested questions", suggestions, key="suggestion_chip", on_change=run_suggestion)
 
-    with st.chat_message("assistant"):
-        # Live steps: each tool call is added to this box as soon as it finishes.
-        status = st.status("🧠 Working on it...", expanded=True)
-        live_steps = []
-        ctx = get_script_run_ctx()
+    prompt = st.chat_input("Type your answer, or pick an option above" if pending
+                           else "Ask a question about your data")
+    if "pending_prompt" in st.session_state:
+        prompt = st.session_state.pop("pending_prompt")
 
-        def on_step(step):
-            # Tools run in a LangGraph worker thread; attach it to this session so st calls work.
-            add_script_run_ctx(threading.current_thread(), ctx)
-            live_steps.append(step)
-            status.update(label=f"🧠 Working... step {len(live_steps)}: {step.tool}")
-            with status:
-                show_step(len(live_steps), step)
+    if prompt and (rule_text := parse_remember(prompt)):
+        # "remember: ..." saves a rule; no agent call needed.
+        rule_memory.add(rule_text)
+        st.session_state.chat_messages += [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": f"Saved the rule *{md_escape(rule_text)}*. "
+                                             "I'll apply it to related questions."},
+        ]
+        st.rerun()
 
-        try:
-            question = AUTO_REPORT_PROMPT if prompt == AUTO_REPORT_LABEL else prompt
-            original = question
-            if pending and prompt != AUTO_REPORT_LABEL:
-                # This message answers the agent's clarifying question: continue the original request.
-                original = pending["original"]
-                if st.session_state.get("remember_answer"):
-                    rule_memory.add(f"{pending['question']} → {prompt}")
-                question = (f'My answer to your question ("{pending["question"]}"): {prompt}\n'
-                            f"Now answer my original request: {original}")
-            st.session_state.pending_clarification = None
-            rules = [r["text"] for r, _ in rule_memory.relevant(question)]
-            # The auto report's instructions already are a plan, so it skips the planning call; it also
-            # skips the critic, whose review + fix round would double its run time on the free tier.
-            is_report = prompt == AUTO_REPORT_LABEL
-            reply = agent.ask(question, dict(datasets), on_step=on_step, critic=use_critic and not is_report,
-                              rules=rules, plan=use_plan and not is_report)
-            status.update(label=steps_label(reply.steps) if reply.steps else "✅ Done",
-                          state="complete", expanded=False)
-            msg = {"role": "assistant", "content": reply.answer,
-                   "charts": reply.charts, "steps": reply.steps}
-            if reply.clarification:
-                msg["content"] = f"❓ {reply.clarification['question']}"
-                msg["clarification"] = reply.clarification
-                st.session_state.pending_clarification = {**reply.clarification, "original": original}
-                status.update(label="❓ The agent needs one detail from you", state="complete")
-            if reply.data_changed:
-                notes = []
-                for name, new_df in reply.datasets.items():
-                    old_df = datasets.get(name)
-                    if old_df is None:
-                        add_dataset(name, new_df, "agent")
-                        notes.append(f"🆕 `{name}` created: {new_df.shape[0]:,}×{new_df.shape[1]}")
-                    elif new_df is not old_df:
-                        datasets[name] = new_df
-                        notes.append(f"`{name}`: {old_df.shape[0]:,}×{old_df.shape[1]} → "
-                                     f"{new_df.shape[0]:,}×{new_df.shape[1]}")
-                if notes:
-                    msg["data_note"] = "✅ Data updated: " + "; ".join(notes)
-        except Exception as e:
-            status.update(label="⚠️ Stopped with an error", state="error", expanded=False)
-            msg = {"role": "assistant", "content": friendly_error(e), "steps": live_steps}
+    if prompt:
+        st.session_state.chat_messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user", avatar=AVATARS["user"]):
+            st.markdown(md_escape(prompt))
 
-    # Save first, then rerun so the chat, sidebar and preview all show the new state.
-    st.session_state.chat_messages.append(msg)
-    st.rerun()
+        with st.chat_message("assistant", avatar=AVATARS["assistant"]):
+            # Live steps: each tool call is added to this box as soon as it finishes.
+            status = st.status("Starting", expanded=True)
+            live_steps = []
+            ctx = get_script_run_ctx()
+
+            def on_step(step):
+                # Tools run in a LangGraph worker thread; attach it to this session so st calls work.
+                add_script_run_ctx(threading.current_thread(), ctx)
+                live_steps.append(step)
+                status.update(label=STEPS.get(step.tool, ("", "", "Working"))[2])
+                with status:
+                    show_step(step)
+
+            try:
+                question = AUTO_REPORT_PROMPT if prompt == AUTO_REPORT_LABEL else prompt
+                original = question
+                if pending and prompt != AUTO_REPORT_LABEL:
+                    # This message answers the agent's clarifying question: continue the original request.
+                    original = pending["original"]
+                    if st.session_state.get("remember_answer"):
+                        rule_memory.add(f"{pending['question']} → {prompt}")
+                    question = (f'My answer to your question ("{pending["question"]}"): {prompt}\n'
+                                f"Now answer my original request: {original}")
+                st.session_state.pending_clarification = None
+                rules = [r["text"] for r, _ in rule_memory.relevant(question)]
+                # The auto report's instructions already are a plan, so it skips the planning call; it also
+                # skips the critic, whose review + fix round would double its run time on the free tier.
+                is_report = prompt == AUTO_REPORT_LABEL
+                reply = agent.ask(question, dict(datasets), on_step=on_step, critic=use_critic and not is_report,
+                                  rules=rules, plan=use_plan and not is_report)
+                status.update(label=f"Done in {len(reply.steps)} steps", state="complete", expanded=False)
+                msg = {"role": "assistant", "content": reply.answer,
+                       "charts": reply.charts, "steps": reply.steps}
+                if reply.clarification:
+                    msg["content"] = reply.clarification["question"]
+                    msg["clarification"] = reply.clarification
+                    st.session_state.pending_clarification = {**reply.clarification, "original": original}
+                    status.update(label="Needs one detail from you", state="complete")
+                if reply.data_changed:
+                    notes = []
+                    for name, new_df in reply.datasets.items():
+                        old_df = datasets.get(name)
+                        if old_df is None:
+                            add_dataset(name, new_df, "agent")
+                            notes.append(f"new table `{name}` with {new_df.shape[0]:,} rows × {new_df.shape[1]} columns")
+                        elif new_df is not old_df:
+                            datasets[name] = new_df
+                            notes.append(f"`{name}` went from {old_df.shape[0]:,}×{old_df.shape[1]} to "
+                                         f"{new_df.shape[0]:,}×{new_df.shape[1]}")
+                    if notes:
+                        msg["data_note"] = "Data updated: " + "; ".join(notes)
+            except Exception as e:
+                status.update(label="Stopped with an error", state="error", expanded=False)
+                msg = {"role": "assistant", "content": friendly_error(e), "steps": live_steps, "error": True}
+
+        # Save first, then rerun so the chat, sidebar and data views all show the new state.
+        st.session_state.chat_messages.append(msg)
+        st.rerun()

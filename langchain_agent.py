@@ -94,6 +94,8 @@ How to work:
    settles it, or when the user already answered in this conversation.
 6. Finish with a short answer in simple words: what you found and the key numbers. Don't paste code in the answer.
    Charts are shown to the user automatically; don't add image links or markdown images.
+   Mark the 1-3 most important numbers or findings by wrapping them in double equals signs,
+   e.g. "Lung has the highest average risk score at ==0.50==". Mark short phrases only, never whole sentences.
 
 Code rules (all tools that take code):
 - Plain Python only. No imports: pd, np, px (plotly.express), go (plotly.graph_objects), plt, alt (altair) are ready.
@@ -111,7 +113,7 @@ Code rules (all tools that take code):
 """
 
 
-AUTO_REPORT_LABEL = "📋 Analyze this dataset"
+AUTO_REPORT_LABEL = "Analyze this dataset"
 AUTO_REPORT_PROMPT = """Analyze this dataset on your own and write a short report.
 Don't change the dataset (no update_dataset); only read it. Don't ask the user questions; pick sensible defaults.
 

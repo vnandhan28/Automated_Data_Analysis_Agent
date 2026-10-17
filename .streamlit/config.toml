@@ -1,11 +1,58 @@
-# .streamlit/config.toml
+# "Dark analyst workspace" theme. Colours match theme.py.
 
 [theme]
-primaryColor = "#1F77B4"         # Deep blue (buttons, sliders)
-backgroundColor = "#FFFFFF"      # Clean white background
-secondaryBackgroundColor = "#F4F6F8"  # Light gray card-style panels
-textColor = "#1A1A1A"            # Dark gray text
-font = "sans serif"              # Modern clean font
+base = "dark"
+primaryColor = "#7C8CFF"              # accent: buttons, links, focus ring, active toggles
+backgroundColor = "#121821"
+secondaryBackgroundColor = "#1A222D"  # surfaces: inputs, code, cards
+textColor = "#E6EAF0"
+borderColor = "#2A3542"
+showWidgetBorder = true
+linkColor = "#7C8CFF"
+codeBackgroundColor = "#1A222D"
+codeTextColor = "#E6EAF0"
+dataframeHeaderBackgroundColor = "#1A222D"
+dataframeBorderColor = "#2A3542"
+
+font = "Geist:https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap"
+codeFont = "'Geist Mono':https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&display=swap"
+baseFontSize = 15
+baseFontWeight = 400
+headingFontSizes = ["36px", "20px", "17px", "15px"]
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+metricValueFontSize = "28px"
+baseRadius = "8px"
+buttonRadius = "8px"
+
+# Status colours (badges, alerts). Yellow is the amber highlighter for key findings.
+greenColor = "#3FB27F"
+greenTextColor = "#3FB27F"
+greenBackgroundColor = "rgba(63, 178, 127, 0.15)"
+orangeColor = "#E0A43A"
+orangeTextColor = "#E0A43A"
+orangeBackgroundColor = "rgba(224, 164, 58, 0.15)"
+redColor = "#EF6A5B"
+redTextColor = "#EF6A5B"
+redBackgroundColor = "rgba(239, 106, 91, 0.15)"
+yellowColor = "#F5C451"
+yellowTextColor = "#F5C451"
+yellowBackgroundColor = "rgba(245, 196, 81, 0.15)"
+blueColor = "#7C8CFF"
+blueTextColor = "#7C8CFF"
+blueBackgroundColor = "rgba(124, 140, 255, 0.12)"
+grayColor = "#8C97A6"
+grayTextColor = "#8C97A6"
+grayBackgroundColor = "#222C39"
+
+chartCategoricalColors = ["#7C8CFF", "#3FB27F", "#F5C451", "#EF6A5B", "#4FC3D9", "#C084FC"]
+
+[theme.sidebar]
+backgroundColor = "#1A222D"
+secondaryBackgroundColor = "#222C39"  # raised surface for inputs in the sidebar
+borderColor = "#2A3542"
+
+[client]
+toolbarMode = "minimal"   # hides the developer "Deploy" button; keeps the main menu
 
 [server]
 enableXsrfProtection = false
