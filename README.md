@@ -12,7 +12,7 @@
 
 ---
 
-## ✨ What it can do
+## What it can do
 
 | | Feature | Example |
 |---|---|---|
@@ -62,7 +62,7 @@ The LLM works in a loop with its tools (plus `ask_user` for clarifying questions
 
 **Learning memory.** Rules are stored with a Gemini embedding; before each question the most similar ones (cosine ≥ 0.6, top 3) are given to the agent. Without a Gemini key a word-overlap match is used instead.
 
-## ✅ Evaluation
+## Evaluation
 
 21 test questions on the three sample datasets, each with an expected answer computed directly with pandas — lookups, group-bys, filters, percentages, charts, cleaning, root-cause and saved-rule questions. Answers are graded automatically (numbers within 1%, required words, chart made, data reshaped correctly, right tool used).
 
@@ -78,7 +78,7 @@ python eval/run_eval.py --models groq:openai/gpt-oss-20b gemini:gemini-3.5-flash
 
 Results: [`eval/results/summary.md`](eval/results/summary.md).
 
-## 🚀 Run it locally
+## Run it locally
 
 ```bash
 git clone https://github.com/vnandhan28/Automated_Data_Analysis_Agent.git
@@ -104,7 +104,7 @@ SAVE_MEMORY = true              # keep saved rules on disk (leave out on a publi
 
 Then pick a sample dataset (cancer risk factors, Netflix titles, Uber bookings, or Uber bookings + a small vehicle price table to try joins) or upload one or more files of your own. `vehicle_types.csv` is a made-up companion table for the join demo.
 
-## 🗂️ Project structure
+## Project structure
 
 ```
 app.py              Streamlit interface: chat, live steps, sidebar, export
@@ -117,12 +117,12 @@ report.py           HTML report export
 eval/               Test questions, runner and results
 ```
 
-## 🔒 Safety
+## Safety
 
 Agent-written code is checked before it runs: no imports, no file/OS/network access, no internal (`_`) attributes, no access to environment variables or secrets, and DuckDB runs with external access switched off. Each tool works on a copy of the data, and the original files are never modified. On the public demo, saved rules last for one session only, so visitors can't influence each other's answers.
 
 In-process Python is never a perfect sandbox, so for a public deployment use free-tier API keys without billing attached.
 
-## 🛠️ Built with
+## Built with
 
 Python · Streamlit · LangChain / LangGraph · pandas · DuckDB · Plotly · Altair · Matplotlib · Groq · Google Gemini
