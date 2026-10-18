@@ -237,7 +237,12 @@ def run_code(code: str, datasets: Dict[str, Any]) -> RunOutcome:
                               error="`result` must be made with as_plotly / as_matplotlib / as_altair / as_data_prep.")
         return RunOutcome(ok=True, output=output, result=result)
     except Exception as exc:
-        return RunOutcome(ok=False, output=buf.getvalue()[:MAX_OUTPUT_CHARS], error=_short_error(exc, code))
+        error = _short_error(exc, code)
+        if isinstance(exc, NameError) and getattr(exc, "name", None) not in datasets:
+            error += ("\nHint: each tool runs fresh code; variables from earlier steps are gone. Recompute "
+                      f"'{exc.name}' in this code, or save it as a table with update_dataset first. "
+                      f"Tables you can use: {list(datasets)}.")
+        return RunOutcome(ok=False, output=buf.getvalue()[:MAX_OUTPUT_CHARS], error=error)
     finally:
         sql.close()
         # Detach new figures from pyplot so they don't pile up in memory.

@@ -49,6 +49,12 @@ QUESTIONS = [
     dict(id="c7", dataset="cancer", kind="chart",
          question="Show a bar chart of the number of patients per cancer type.",
          chart=True),
+    dict(id="c9", dataset="cancer", kind="data prep + chart",
+         # Needs a derived column + group-by + chart in one go (catches "variable from an earlier step" bugs).
+         question="For each cancer type, what percentage of patients are heavy smokers (Smoking of 7 or more)? "
+                  "Show it as a bar chart.",
+         chart=True, text=["Lung"],
+         numbers=lambda c: [c.assign(h=c["Smoking"] >= 7).groupby("Cancer_Type")["h"].mean().max() * 100]),
     dict(id="c8", dataset="cancer", kind="root-cause",
          question="Why is the average Overall_Risk_Score higher for Lung cancer than for Prostate cancer? "
                   "Which factors drive the difference?",

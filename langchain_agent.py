@@ -91,6 +91,11 @@ How to work:
 Code: plain Python, no imports (pd, np, px, go, plt, alt are ready). SQL: sql.query('SELECT ... FROM <table>')
 (DuckDB; quote names with spaces: "Vehicle Type"). No files, OS or network; no names starting with _.
 Join with pd.merge(a, b, on=..., how="left") and check the row count.
+Each tool call runs fresh code: variables from earlier calls are gone. make_chart code must be
+self-contained (prepare the data and draw the chart in the same code), e.g.
+  df = data.groupby("Vehicle Type", as_index=False)["Booking Value"].mean()
+  fig = px.bar(df, x="Vehicle Type", y="Booking Value", title="Average booking value by vehicle type")
+  result = as_plotly(fig, "Go Sedan has the highest average value.")
 make_chart code ends with result = as_plotly(fig, "one-sentence explanation") (or as_matplotlib /
 as_altair); prefer plotly with a clear title and axis labels.
 update_dataset code ends with result = as_data_prep({"<table>": new_df}, "what changed"). Cleaning
@@ -152,7 +157,8 @@ Check only these things:
 1. The code answers the question that was asked (right columns, filters, grouping, aggregation).
 2. Every number in the final answer appears in, or follows directly from, the tool outputs. Rounding is fine.
 3. No overclaiming: no causes, trends or certainty that the outputs don't support.
-4. If a chart was asked for, a successful make_chart step exists.
+4. If a chart was asked for, a successful make_chart step exists. A chart doesn't replace the answer: if the
+   question asks for numbers (e.g. "what percentage"), the answer text must state the key ones.
 5. If the question lists saved rules from the user, the code and answer follow the ones that apply.
 6. If the question includes a plan, every step of the plan was carried out or the answer says why not.
 7. If the user asked to change the data (drop, remove, clean, filter, rename, join...), a successful
@@ -389,6 +395,7 @@ class DataAgent:
         self.charts: List[ChartResult] = []
         self.steps: List[Step] = []
         self.failed_runs = 0
+        self.last_error = ""
         self.data_changed = False
         self.clarification: Optional[Dict[str, Any]] = None
         self.on_step = on_step
@@ -403,11 +410,22 @@ class DataAgent:
     def _failed(self, tool: str, code: str, error: str) -> str:
         self.failed_runs += 1
         left = MAX_FAILED_RUNS - self.failed_runs
+        attempts = f"{left} attempt{'s' if left != 1 else ''} left"
+        # Same error as the previous failure: the model is going in circles. Compare the exception line
+        # (e.g. "NameError: name 'plot_df' is not defined"), not the code line, which shifts between attempts.
+        lines = error.strip().splitlines()
+        key = next((l for l in lines if re.match(r"[\w.]+(Error|Exception)\b", l)), lines[-1] if lines else "")
+        repeated = key == self.last_error
+        self.last_error = key
         if left <= 0:
             msg = (f"ERROR:\n{error}\n\nToo many failed attempts. Stop calling tools and tell the user "
                    "briefly what went wrong and what they could try instead.")
+        elif repeated:
+            msg = (f"ERROR:\n{error}\n\nThis is the SAME error as your last attempt, so repeating the approach won't "
+                   "work. Change it: e.g. put all the code in one tool call, use different columns, or a simpler "
+                   f"method ({attempts}).")
         else:
-            msg = f"ERROR:\n{error}\n\nFix the code and try again ({left} attempts left)."
+            msg = f"ERROR:\n{error}\n\nFix the code and try again ({attempts})."
         return self._log(tool, code, False, msg)
 
     def _out_of_attempts(self, tool: str, code: str) -> Optional[str]:
@@ -429,11 +447,19 @@ class DataAgent:
         res = run_code(code, self.datasets)
         if not res.ok:
             return self._failed("run_analysis", code, res.error)
+        if res.result is not None and res.result.kind == "data_prep":
+            # Nothing from run_analysis is kept, so saving data here would silently do nothing.
+            return self._failed("run_analysis", code,
+                                "run_analysis doesn't save data. Put all the code (data prep + chart) in make_chart, "
+                                "or use update_dataset to save a new table."
+                                + (f"\nPrinted output:\n{res.output.strip()}" if res.output.strip() else ""))
         out = res.output.strip() or "(nothing printed - use print() to see results)"
         return self._log("run_analysis", code, True, out)
 
     def make_chart(self, code: str) -> str:
-        """Build a chart. Code must set result = as_plotly(fig, ...) / as_matplotlib(fig, ...) / as_altair(chart, ...). The chart is shown to the user."""
+        """Build a chart, shown to the user. The code must be self-contained: prepare the data AND draw the chart
+        here (variables from earlier tool calls don't exist). End with result = as_plotly(fig, ...) /
+        as_matplotlib(fig, ...) / as_altair(chart, ...)."""
         if (stop := self._out_of_attempts("make_chart", code)):
             return stop
         res = run_code(code, self.datasets)

@@ -64,7 +64,7 @@ The LLM works in a loop with its tools (plus `ask_user` for clarifying questions
 
 ## Evaluation
 
-21 test questions on the three sample datasets, each with an expected answer computed directly with pandas — lookups, group-bys, filters, percentages, charts, cleaning, root-cause and saved-rule questions. Answers are graded automatically (numbers within 1%, required words, chart made, data reshaped correctly, right tool used).
+22 test questions on the three sample datasets, each with an expected answer computed directly with pandas — lookups, group-bys, filters, percentages, charts, cleaning, root-cause and saved-rule questions. Answers are graded automatically (numbers within 1%, required words, chart made, data reshaped correctly, right tool used).
 
 | Model | Critic | Correct | Avg. time |
 |---|---|---|---|
