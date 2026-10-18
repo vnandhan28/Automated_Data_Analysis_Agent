@@ -232,7 +232,12 @@ if __name__ == "__main__":
     p.add_argument("--only", nargs="+", help="question ids to run, e.g. c1 u4")
     p.add_argument("--summary", action="store_true", help="only rebuild the summary from saved results")
     p.add_argument("--regrade", action="store_true", help="re-check saved answers after a grader fix (no API calls)")
+    p.add_argument("--results", help="CSV to use instead of eval/results/results.csv (e.g. to compare versions); "
+                                     "the summary is written next to it")
     a = p.parse_args()
+    if a.results:  # module-level names, read by the functions above
+        RESULTS = Path(a.results).resolve()
+        SUMMARY = RESULTS.with_name(RESULTS.stem + "_summary.md")
     if a.regrade:
         regrade()
     elif not a.summary:

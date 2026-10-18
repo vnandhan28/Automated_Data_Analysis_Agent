@@ -53,6 +53,49 @@ def dataset_name(filename: str, taken) -> str:
     return name
 
 
+METRIC_HINTS = ("value", "amount", "price", "revenue", "sales", "score", "total", "cost", "fare", "profit",
+                "income", "rating", "spend", "count", "quantity")
+GROUP_HINTS = ("type", "category", "segment", "region", "class", "group", "status", "country", "method")
+
+
+def suggest_questions(datasets) -> list:
+    """Starter questions built from the first table's columns (works for any uploaded file, no AI call)."""
+    df = next(iter(datasets.values()))
+    cols = [str(c) for c in df.columns]
+    year_col = next((c for c in cols if "year" in c.lower() and pd.api.types.is_numeric_dtype(df[c])), None)
+    date_col = next((c for c in cols if "date" in c.lower() or pd.api.types.is_datetime64_any_dtype(df[c])), None)
+    def looks_like_id(c):  # unique whole numbers (order_id 1, 2, 3...); unique decimals are measurements
+        s = df[c].dropna()
+        return s.is_unique and len(s) > 50 and bool((s % 1 == 0).all())
+
+    def hint_rank(c, hints):  # earlier hints win ("type" before "status"); no hint ranks last
+        return next((i for i, h in enumerate(hints) if h in c.lower()), len(hints))
+
+    numeric = [c for c in cols if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])
+               and df[c].nunique() > 10 and c != year_col and not looks_like_id(c)]
+    groups = [c for c in cols if not pd.api.types.is_numeric_dtype(df[c]) and 2 <= df[c].nunique() <= 20]
+    metric = min(numeric, key=lambda c: (hint_rank(c, METRIC_HINTS), -df[c].notna().mean()), default=None)
+    group = min(groups, key=lambda c: (hint_rank(c, GROUP_HINTS), df[c].isna().mean(), abs(df[c].nunique() - 6)),
+                default=None)
+    qs = []
+    if len(datasets) > 1:
+        qs.append("How can these tables be joined? Join them and summarize the result.")
+    if metric and group:
+        qs.append(f"What is the average {metric} by {group}? Show a bar chart.")
+    if metric and date_col:
+        qs.append(f"Is total {metric} going up or down over time?")
+    elif year_col:
+        qs.append(f"How many rows are there per {year_col}? Show it as a line chart.")
+    elif group:
+        qs.append(f"Which {group} is most common, and what share of rows is it?")
+    if metric and len(numeric) >= 2:
+        qs.append(f"What is most strongly related to {metric}?")
+    qs.append("Are there missing values or duplicates? Clean them up.")
+    if len(qs) < 3:
+        qs.insert(0, "Give me a quick overview of this dataset")
+    return qs[:4]
+
+
 def md_escape(text: str) -> str:
     """Show tool output as plain text inside markdown."""
     return re.sub(r"([\\`*_\[\]<>#|~$])", r"\\\1", text)
@@ -197,6 +240,12 @@ with start:
         uploads = st.file_uploader("Drop CSV or Excel files here", type=["csv", "xlsx"],
                                    accept_multiple_files=True,
                                    help="You can add several files; the agent can join them.")
+        st.caption("Questions that work on most files:  \n"
+                   "• Give me a quick overview of this dataset  \n"
+                   "• Which *category* has the highest average *value*?  \n"
+                   "• Why did *value* change from March to April?  \n"
+                   "• Forecast *value* for the next 3 months  \n"
+                   "After upload you'll get suggestions based on your columns.")
     st.pills("Or try an example question", list(EXAMPLES), key="example_chip", on_change=run_example)
 
 # Sync uploaded files with the datasets (add new files, drop removed ones).
@@ -446,13 +495,8 @@ with chat_tab:
                     help="Saves the question and your answer, so the agent won't need to ask again.")
 
     if not st.session_state.chat_messages:
-        suggestions = [
-            "How can these tables be joined? Join them and summarize the result." if len(datasets) > 1
-            else "Give me a quick overview of this dataset",
-            "What are the most interesting patterns? Show one chart.",
-            "Are there missing values? Clean them up.",
-        ]
-        st.pills("Suggested questions", suggestions, key="suggestion_chip", on_change=run_suggestion)
+        st.pills("Suggested for this data", suggest_questions(datasets), key="suggestion_chip",
+                 on_change=run_suggestion)
 
     prompt = st.chat_input("Type your answer, or pick an option above" if pending
                            else "Ask a question about your data")

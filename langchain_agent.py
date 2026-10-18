@@ -18,7 +18,7 @@ outputs. If it finds problems, the agent gets one chance to fix them.
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from langchain.agents import create_agent
@@ -27,9 +27,10 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 
-from AgentClass import RESERVED_NAMES, ChartResult, describe_datasets, run_code
+from AgentClass import RESERVED_NAMES, ChartResult, describe_datasets, join_hints, run_code
 from rootcause import format_root_cause, root_cause
 from stats import run_stats
+from theme import strip_highlights
 
 # LLM providers (all OpenAI-compatible). "key" is the secrets.toml entry holding the API key;
 # "models" are tool-calling models, the first one is the default.
@@ -66,50 +67,35 @@ CRITIC_OUTPUT_BUDGET = 12000  # characters of tool output the critic sees in tot
 REQUEST_BUDGET_CHARS = 18000
 KEEP_FULL_TOOL_OUTPUTS = 2    # the most recent tool outputs are never shortened
 
-SYSTEM_PROMPT = """You are a data analysis agent. The user has loaded tabular data and asks questions about it.
-
-Datasets are pandas DataFrames available in your code by their names (inspect_data lists them).
-If there are several datasets, inspect_data also suggests join columns. Combine them with
-pd.merge(a, b, on=..., how="left") or SQL JOINs; check the row count after a join.
+SYSTEM_PROMPT = """You are a data analysis agent answering questions about the user's tables
+(pandas DataFrames, available in code by name). The user's message lists each table's columns.
 
 How to work:
-1. If you are not sure about column names, types or values, call inspect_data first.
-2. Use run_analysis to compute numbers and check them before you chart or answer. Print what you need to see.
-3. Use make_chart to draw a chart when it helps or when the user asks for one.
-4. Use update_dataset only when the user asks to clean, filter, rename or otherwise change the data.
-   Use explain_change when the user asks WHY a metric differs between two periods or groups
-   (e.g. "why did revenue drop in April?"). To chart its breakdown, in make_chart code use
-   table, summary = root_cause(<dataset>, metric, split_column, group_a, group_b, agg)
-   (table columns: column, segment, A, B, contribution, pct_of_change, expected, unexpected).
-   Use stats_check for correlations, outliers, trends ("is X growing?") and forecasts ("what will X be
-   next month?") instead of writing that statistics code yourself. To chart its result, in make_chart code use
-   table, text = run_stats(<dataset>, kind, columns, metric, date_column, agg, freq, periods)
-   (forecast table: period, forecast, low, high; trend table: period, value, trend_line).
-   Never invent forecasts or trends without these numbers.
-5. If a tool returns an error, read it, fix the code and try again. Do not repeat the same code.
-   Ask instead of guessing: after inspecting the data, if you would have to CHOOSE between two or more
-   columns or definitions that give different numbers, call ask_user with one short question and the
-   choices as options. Example: the user says "region" but the data has "Pickup Location" and
-   "Drop Location" -> ask which one. Don't ask when only one reading makes sense, when a saved rule
-   settles it, or when the user already answered in this conversation.
-6. Finish with a short answer in simple words: what you found and the key numbers. Don't paste code in the answer.
-   Charts are shown to the user automatically; don't add image links or markdown images.
-   Mark the 1-3 most important numbers or findings by wrapping them in double equals signs,
-   e.g. "Lung has the highest average risk score at ==0.50==". Mark short phrases only, never whole sentences.
+1. The columns are listed; call inspect_data only for sample rows or a column's values/statistics.
+2. Compute with run_analysis (print what you need) before answering or charting. Use make_chart when
+   asked or when a chart helps.
+3. Change data with update_dataset only when asked (clean, filter, rename, join). When asked, really
+   change it with update_dataset; don't just compute what the result would be.
+4. "Why did X change between A and B?" -> explain_change. Correlations, outliers, trends, forecasts ->
+   stats_check; never invent trends or forecasts. To chart their tables in make_chart code:
+   root_cause(df, metric, split_column, group_a, group_b, agg) or
+   run_stats(df, kind, columns, metric, date_column, agg, freq, periods).
+5. If you would have to choose between columns or definitions that give different numbers (e.g. "region"
+   when there are Pickup and Drop Location), call ask_user with the choices, unless a saved rule or an
+   earlier answer settles it.
+6. On a tool error, fix the code; don't repeat it.
+7. Answer briefly in plain words with the key numbers. No code, no image links (charts show
+   automatically). Inside your sentences, wrap the 1-3 key numbers or short findings in double equals
+   signs, e.g. "Lung has the highest average risk score at ==0.50==."
 
-Code rules (all tools that take code):
-- Plain Python only. No imports: pd, np, px (plotly.express), go (plotly.graph_objects), plt, alt (altair) are ready.
-- SQL: df = sql.query('SELECT ... FROM <dataset> ...') (DuckDB, read-only; quote column names with spaces: "Vehicle Type").
-- No file, OS or network access. No names starting with underscore.
-- make_chart code must end with one of:
-    result = as_plotly(fig, "one-sentence explanation")
-    result = as_matplotlib(fig, "one-sentence explanation")
-    result = as_altair(chart, "one-sentence explanation")
-  Prefer plotly. Give the chart a clear title and axis labels.
-- update_dataset code must end with:
-    result = as_data_prep({"<dataset name>": new_df}, "what changed")
-  To keep a joined or derived table for later questions, use a NEW name, e.g.
-    result = as_data_prep({"rides_with_prices": merged}, "joined rides with vehicle prices")
+Code: plain Python, no imports (pd, np, px, go, plt, alt are ready). SQL: sql.query('SELECT ... FROM <table>')
+(DuckDB; quote names with spaces: "Vehicle Type"). No files, OS or network; no names starting with _.
+Join with pd.merge(a, b, on=..., how="left") and check the row count.
+make_chart code ends with result = as_plotly(fig, "one-sentence explanation") (or as_matplotlib /
+as_altair); prefer plotly with a clear title and axis labels.
+update_dataset code ends with result = as_data_prep({"<table>": new_df}, "what changed"). Cleaning
+updates the table under its OWN name; use a new name only for a join or when the user wants to keep
+the original, e.g. {"rides_priced": merged}.
 """
 
 
@@ -117,7 +103,7 @@ AUTO_REPORT_LABEL = "Analyze this dataset"
 AUTO_REPORT_PROMPT = """Analyze this dataset on your own and write a short report.
 Don't change the dataset (no update_dataset); only read it. Don't ask the user questions; pick sensible defaults.
 
-1. Call inspect_data to understand the columns.
+1. The columns are listed in this message; call inspect_data only if you need sample rows.
 2. Use run_analysis for the key facts: size, missing values, main numeric columns, top categories.
    Call stats_check with kind='correlations' and kind='outliers' (and kind='trend' if there is a date column).
 3. Make 2 charts with make_chart (one chart per call) that show the most important patterns.
@@ -169,6 +155,8 @@ Check only these things:
 4. If a chart was asked for, a successful make_chart step exists.
 5. If the question lists saved rules from the user, the code and answer follow the ones that apply.
 6. If the question includes a plan, every step of the plan was carried out or the answer says why not.
+7. If the user asked to change the data (drop, remove, clean, filter, rename, join...), a successful
+   update_dataset step exists; computing the result without changing the data is a problem.
 
 Charts from make_chart are shown to the user automatically next to the answer, so the answer
 text should NOT contain the chart itself. A short description of the chart is correct.
@@ -185,6 +173,82 @@ def _text(content: Any) -> str:
     if isinstance(content, list):
         return " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
     return content or ""
+
+
+# ---------------------------------------------------------------- data summary sent with each question
+# A compact column list in the first message lets the agent skip an inspect_data round trip,
+# which on free tiers saves a whole model call plus ~1k tokens re-sent with every later call.
+
+_summary_cache: Dict[Any, str] = {}
+
+
+def _table_summary(name: str, df: pd.DataFrame) -> str:
+    key = (name, id(df), df.shape)
+    if key not in _summary_cache:
+        cols = []
+        for c in df.columns:
+            s = df[c]
+            kind = ("bool" if pd.api.types.is_bool_dtype(s) else "int" if pd.api.types.is_integer_dtype(s)
+                    else "float" if pd.api.types.is_float_dtype(s) else "date" if pd.api.types.is_datetime64_any_dtype(s)
+                    else "text")
+            nulls = int(s.isna().sum())
+            info = kind + (f", {nulls:,} missing" if nulls else "")
+            if kind == "text" and 0 < s.nunique() <= 8:  # small categories: list the values
+                # "…" marks a shortened value, so the model looks it up instead of filtering on a cut-off string
+                info += ": " + " | ".join(v if len(v) <= 40 else v[:38] + "…"
+                                          for v in map(str, s.dropna().unique()[:8]))
+            cols.append(f"{c} ({info})")
+        _summary_cache[key] = f"- {name} ({len(df):,} rows): " + "; ".join(cols)
+    return _summary_cache[key]
+
+
+def data_summary(datasets: Dict[str, Any]) -> str:
+    lines = ["Tables (use these exact names):"] + [_table_summary(n, d) for n, d in datasets.items()
+                                                     if isinstance(d, pd.DataFrame)]
+    if len(datasets) > 1 and (hints := join_hints(datasets)):
+        lines.append("Possible joins:\n" + "\n".join(hints))
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- quick number check (before the critic)
+
+_SCALE = {"k": 1e3, "thousand": 1e3, "lakh": 1e5, "lakhs": 1e5, "m": 1e6, "million": 1e6,
+          "crore": 1e7, "crores": 1e7, "b": 1e9, "billion": 1e9}
+_NUMBER = re.compile(r"(\d+(?:\.\d+)?)(?:\s*(k|thousand|lakhs?|m|million|crores?|b|billion)\b)?", re.I)
+
+
+def numbers_in(text: str) -> List[float]:
+    """Numbers in free text: handles 1,234 / 1 234 / 4.5 lakh / 3.2M / unicode minus signs."""
+    t = re.sub(r"[‐-―−]", "-", strip_highlights(text))
+    t = re.sub(r"[    ]", " ", t)
+    t = re.sub(r"(?<=\d)[, ](?=\d{3}(?!\d))", "", t)
+    return [float(n) * (_SCALE[u.lower()] if u else 1) for n, u in _NUMBER.findall(t)]
+
+
+# Requests to change the data: the quick number check can't tell whether the change was really made.
+CHANGE_REQUEST = re.compile(r"\b(drop|remove|delete|clean|filter|rename|replace|fill|impute|dedupe|deduplicate|"
+                            r"join|merge|convert|add (a )?column|keep only)\b", re.I)
+
+
+# Clear commands to modify the data (not "filter"/"join", which are usually analysis, e.g. "filter to 2024
+# and show the average"). If one of these is asked and no update_dataset ran, the agent must apply it.
+MUST_CHANGE = re.compile(r"\b(drop|remove|delete|clean( it| them)? up|clean|deduplicate|dedupe|rename|"
+                         r"fill (in )?(the )?missing|impute)\b", re.I)
+
+
+def unverified_numbers(answer: str, sources: str) -> Tuple[int, List[float]]:
+    """(numbers checked, numbers in the answer that appear nowhere in the sources, allowing for rounding
+    and for fractions written as percentages). Small whole numbers (0-10) are skipped."""
+    pool = [abs(v) for v in numbers_in(sources)]
+    pool += [v * 100 for v in pool if v <= 1]
+    checked, missing = 0, []
+    for a in (abs(v) for v in numbers_in(answer)):
+        if a <= 10 and a == int(a):
+            continue
+        checked += 1
+        if not any(abs(a - s) <= max(0.005 * s, 0.006 if s < 1 else 0) for s in pool):
+            missing.append(a)
+    return checked, missing
 
 
 def _size(msg) -> int:
@@ -387,7 +451,9 @@ class DataAgent:
                          f"Chart created and shown to the user ({r.kind}). {summary}\nExplanation: {r.explanation}")
 
     def update_dataset(self, code: str) -> str:
-        """Clean or transform data (drop nulls, rename, filter, add columns, join...). Code must set result = as_data_prep({"<dataset name>": new_df}, "what changed"). A new name creates a new dataset (e.g. a joined table). Later steps use the new data."""
+        """Clean or transform a table (drop nulls, rename, filter, add columns, join). Code must set
+        result = as_data_prep({"<table>": new_df}, "what changed"). Use the table's SAME name to replace it
+        (cleaning, filtering); a new name only for a joined table or when the user wants to keep the original."""
         if (stop := self._out_of_attempts("update_dataset", code)):
             return stop
         res = run_code(code, self.datasets)
@@ -419,12 +485,10 @@ class DataAgent:
 
     def explain_change(self, metric: str, split_column: str, group_a: str, group_b: str,
                        agg: str = "sum", dataset: str = "") -> str:
-        """Root-cause finder: why did a metric change between two groups or periods?
-        Compares agg ('sum', 'mean' or 'count') of `metric` for split_column == group_a vs group_b,
-        breaks the change down by every other column and ranks the segments that caused most of it.
-        For periods, pass the date column itself with prefixes: split_column='Date',
-        group_a='2024-03', group_b='2024-04' (no need to add a month column). For row counts use agg='count'.
-        `dataset` is the dataset name; it can be left empty when only one dataset is loaded."""
+        """Why did a metric change between two groups or periods? Compares agg ('sum', 'mean' or 'count') of
+        metric where split_column is group_a vs group_b, and ranks the segments of every other column that
+        drove it. Periods: split_column='Date', group_a='2024-03', group_b='2024-04' (prefixes).
+        Leave dataset empty when only one table is loaded."""
         call = (f"explain_change(metric={metric!r}, split_column={split_column!r}, "
                 f"group_a={group_a!r}, group_b={group_b!r}, agg={agg!r})")
         if (stop := self._out_of_attempts("explain_change", call)):
@@ -442,13 +506,10 @@ class DataAgent:
 
     def stats_check(self, kind: str, columns: str = "", metric: str = "", date_column: str = "",
                     agg: str = "sum", freq: str = "M", periods: int = 3, dataset: str = "") -> str:
-        """Ready-made, reliable statistics. kind:
-        'correlations' - strongest correlations between numeric columns (optional `columns`, comma-separated)
-        'outliers'     - unusual values per numeric column, IQR rule (optional `columns`)
-        'trend'        - is `metric` (agg 'sum'/'mean'/'count') going up or down over `date_column`
-                         per freq ('D','W','M','Q','Y')? Includes significance.
-        'forecast'     - simple forecast of `metric` for the next `periods` periods, with a 95% range and a backtest.
-        `dataset` can be left empty when only one dataset is loaded."""
+        """Reliable statistics. kind: 'correlations' or 'outliers' (optional comma-separated columns);
+        'trend' (is metric rising or falling over date_column per freq D/W/M/Q/Y, with significance);
+        'forecast' (next `periods` periods with a 95% range and a backtest). agg: sum, mean or count.
+        Leave dataset empty when only one table is loaded."""
         call = (f"stats_check(kind={kind!r}" + (f", columns={columns!r}" if columns else "")
                 + (f", metric={metric!r}, date_column={date_column!r}, agg={agg!r}, freq={freq!r}"
                    if date_column else "") + (f", periods={periods}" if kind.startswith("forecast") else "") + ")")
@@ -467,11 +528,8 @@ class DataAgent:
         return self._log("stats_check", call, True, text)
 
     def ask_user(self, question: str, options: Optional[List[str]] = None) -> str:
-        """Ask the user ONE short clarifying question instead of guessing, then stop and wait.
-        Only use it when the request is ambiguous in a way that changes the answer and the data
-        can't settle it (e.g. a column the user names doesn't exist, or a term like 'revenue' or
-        'active customer' has several plausible meanings). Give 2-4 short suggested answers in
-        `options` when you can (e.g. real column names)."""
+        """Ask the user one short clarifying question, then stop and wait. Only when choosing between
+        columns or definitions would change the answer. Give 2-4 short options."""
         options = [str(o).strip() for o in (options or []) if str(o).strip()][:4]
         self.clarification = {"question": question.strip(), "options": options}
         self._log("ask_user", "", True, question.strip()
@@ -524,6 +582,19 @@ class DataAgent:
 
     # ------------------------------------------------------------ main entry
 
+    def _numbers_verified(self, question: str, answer: str, planned: bool) -> bool:
+        """True when the full LLM critic can be skipped: the answer has numbers, all of them appear in the
+        question or tool outputs, and the work wasn't interpretive (plans, root causes, statistics and data
+        changes always get the full review, since overclaiming is the risk there)."""
+        done = [s for s in self.steps if s.ok and s.tool not in ("critic", "plan", "memory", "ask_user")]
+        if planned or self.data_changed or not done or any(s.tool in ("explain_change", "stats_check") for s in done):
+            return False
+        if CHANGE_REQUEST.search(question):  # the action itself must be checked, not just the numbers
+            return False
+        sources = question + "\n" + "\n".join(f"{s.code}\n{s.output}" for s in done)
+        checked, missing = unverified_numbers(answer, sources)
+        return checked > 0 and not missing
+
     def _make_plan(self, question: str) -> Optional[str]:
         """One short LLM call that writes a numbered plan. None if it fails or looks wrong."""
         tables = "\n".join(f"- {name} ({df.shape[0]:,} rows): {', '.join(map(str, df.columns))[:600]}"
@@ -550,18 +621,32 @@ class DataAgent:
             self._log("memory", "", True, "Using saved rules:\n" + "\n".join(f"- {r}" for r in rules))
             full_question = ("The user saved these rules earlier. Follow them where they apply:\n"
                              + "\n".join(f"- {r}" for r in rules) + f"\n\nQuestion: {question}")
+        planned = False
         if plan and needs_plan(question) and (steps := self._make_plan(full_question)):
+            planned = True
             self._log("plan", "", True, steps)
             full_question += (f"\n\nFollow this plan step by step:\n{steps}\n"
                               "The user can already see the plan, so in the final answer don't narrate the "
                               "steps; just answer every part of the request concisely.")
-        messages = self.history[-MAX_HISTORY_MESSAGES:] + [HumanMessage(full_question)]
+        messages = self.history[-MAX_HISTORY_MESSAGES:] + [
+            HumanMessage(f"{data_summary(self.datasets)}\n\n{full_question}")]
 
         answer, convo = self._run(messages)
+        # Exact check (runs even with the critic off): a clear request to change the data must
+        # actually change it; models sometimes only compute what the result would be.
+        change_missing = bool(MUST_CHANGE.search(question)) and not any(
+            s.tool == "update_dataset" and s.ok for s in self.steps)
         if self.clarification:  # the agent is waiting for the user: nothing to review yet
             answer = self.clarification["question"]
-        elif answer is not None and critic:
-            verdict = self._critique(full_question, answer, self.steps)
+        elif answer is not None and critic and not change_missing and \
+                self._numbers_verified(full_question, answer, planned):
+            # Cheap path: every number is in the tool outputs and nothing needs interpretation.
+            self._log("critic", "", True, "Every number in the answer matches the tool outputs "
+                                          "(quick check, no extra AI call needed).")
+        elif answer is not None and (critic or change_missing):
+            verdict = ({"ok": False, "problems": ["The user asked to change the data, but no update_dataset step "
+                                                  "ran. Apply the change with update_dataset, then answer."]}
+                       if change_missing else self._critique(full_question, answer, self.steps))
             if verdict["ok"]:
                 self._log("critic", "", True, verdict.get("note", "Looks correct: the code matches the question "
                                                                   "and the numbers match the tool outputs."))
